@@ -145,9 +145,23 @@ model File {
 
   name String
   size String
+  providerFileId String?
 
   shareId String
   share   Share  @relation(fields: [shareId], references: [id], onDelete: Cascade)
+}
+
+model DriveUpload {
+  id         String   @id
+  shareId    String
+  name       String
+  sessionUri String?
+  bytesSent  Int      @default(0)
+  remainder  Bytes?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([shareId])
 }
 
 model ShareSecurity {

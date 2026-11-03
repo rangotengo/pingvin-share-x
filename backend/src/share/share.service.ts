@@ -179,7 +179,7 @@ export class ShareService {
             ? share.recipients.map((email) => ({ email }))
             : [],
         },
-        storageProvider: this.configService.get("s3.enabled") ? "S3" : "LOCAL",
+        storageProvider: this.fileService.resolveNewShareProvider(),
       },
     });
 
@@ -204,7 +204,7 @@ export class ShareService {
 
     const share = await this.prisma.share.findUnique({
       where: { id: shareId },
-      select: { id: true },
+      select: { id: true, storageProvider: true },
     });
 
     if (!share) {
@@ -215,7 +215,10 @@ export class ShareService {
     const sharePath = `${SHARE_DIRECTORY}/${share.id}`;
     const zipPath = `${sharePath}/archive.zip`;
 
-    if (this.config.get("s3.enabled")) {
+    if (
+      share.storageProvider === "S3" ||
+      share.storageProvider === "GOOGLE_DRIVE"
+    ) {
       await this.prisma.share
         .update({
           where: { id: shareId },

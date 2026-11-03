@@ -270,6 +270,18 @@ export class ConfigService extends EventEmitter {
     return updatedVariable;
   }
 
+  async setInternal(key: `${string}.${string}`, value: string | null) {
+    const [category, name] = key.split(".");
+    await this.prisma.config.update({
+      where: { name_category: { category, name } },
+      data: { value },
+    });
+    const variable = this.configVariables.find(
+      (item) => item.category === category && item.name === name,
+    );
+    if (variable) variable.value = value;
+  }
+
   validateConfigVariable(key: string, value: string | number | boolean) {
     const validations = [
       {
@@ -288,6 +300,25 @@ export class ConfigService extends EventEmitter {
         message: this.t(
           "config.zipCompressionLevelValidation",
           "Zip compression level must be between 0 and 9",
+        ),
+      },
+      {
+        key: "googledrive.enabled",
+        condition: (value: unknown) =>
+          !(value === true || value === "true") || !this.get("s3.enabled"),
+        message: this.t(
+          "config.driveAndS3",
+          "Enable only one of Google Drive or S3",
+        ),
+      },
+      {
+        key: "s3.enabled",
+        condition: (value: unknown) =>
+          !(value === true || value === "true") ||
+          !this.get("googledrive.enabled"),
+        message: this.t(
+          "config.driveAndS3",
+          "Enable only one of Google Drive or S3",
         ),
       },
       {

@@ -42,6 +42,10 @@ const sidebars: SidebarsConfig = {
         },
         {
           type: "doc",
+          id: "setup/google-drive",
+        },
+        {
+          type: "doc",
           id: "setup/upgrading",
         },
       ],

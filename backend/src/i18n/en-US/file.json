@@ -14,5 +14,10 @@
   "s3SessionNotFound": "Multipart upload session not found.",
   "s3UploadFailed": "Multipart upload failed. The upload has been aborted.",
   "s3SizeError": "Could not retrieve file size",
-  "s3NotSupported": "Pre-signed operations are only supported for S3 storage."
+  "s3NotSupported": "Pre-signed operations are only supported for S3 storage.",
+  "driveNotConfigured": "Google Drive client ID and secret are required",
+  "driveNotConnected": "Google Drive is not connected",
+  "driveUploadFailed": "Google Drive upload failed",
+  "driveFolderInvalid": "Google Drive folder is not configured",
+  "driveAndS3": "Enable only one of Google Drive or S3"
 }

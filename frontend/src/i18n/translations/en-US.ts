@@ -886,6 +886,22 @@ export default {
   "admin.config.notify.logo-success":
     "Logo updated successfully. It may take a few minutes to update on the website.",
   "admin.config.notify.no-changes": "No changes to save.",
+  "admin.config.category.googledrive": "Google Drive",
+  "admin.config.googledrive.enabled": "Enabled",
+  "admin.config.googledrive.enabled.description":
+    "Store new shares in one private Google Drive folder. Do not enable this together with S3. Save the client ID and secret, then connect the account.",
+  "admin.config.googledrive.client-id": "Client ID",
+  "admin.config.googledrive.client-id.description":
+    "OAuth client ID from Google Cloud. Enable the Drive API and add the redirect URI shown above.",
+  "admin.config.googledrive.client-secret": "Client secret",
+  "admin.config.googledrive.client-secret.description":
+    "OAuth client secret. Stored on the server and never sent to share recipients.",
+  "admin.config.googledrive.folder-id": "Folder ID",
+  "admin.config.googledrive.folder-id.description":
+    "Optional folder created by this app. Leave blank to create a dedicated folder on connect. drive.file scope cannot use an unrelated existing folder.",
+  "admin.config.googledrive.folder-name": "Folder name",
+  "admin.config.googledrive.folder-name.description":
+    "Name used when creating the dedicated folder.",
   "admin.config.category.s3": "S3",
   "admin.config.s3.enabled": "Enabled",
   "admin.config.s3.enabled.description":

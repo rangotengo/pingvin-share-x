@@ -99,6 +99,14 @@ export class JobsService {
     }
   }
 
+  @Cron("15 0 * * *")
+  async cleanupStaleDriveUploads() {
+    const removed = await this.fileService.cleanupStaleDriveUploads();
+    if (removed > 0) {
+      this.logger.log(`Deleted ${removed} stale Drive uploads`);
+    }
+  }
+
   @Cron("0 0 * * *")
   deleteTemporaryFiles() {
     let filesDeleted = 0;

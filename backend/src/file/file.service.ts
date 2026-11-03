@@ -7,6 +7,7 @@ import {
 } from "@nestjs/common";
 import { CACHE_MANAGER } from "@nestjs/cache-manager";
 import { Cache } from "cache-manager";
+import { GoogleDriveFileService } from "./google-drive.service";
 import { LocalFileService } from "./local.service";
 import { S3FileService } from "./s3.service";
 import { ConfigService } from "src/config/config.service";
@@ -24,6 +25,7 @@ export class FileService {
     private prisma: PrismaService,
     private localFileService: LocalFileService,
     private s3FileService: S3FileService,
+    private googleDriveFileService: GoogleDriveFileService,
     private configService: ConfigService,
     private emailService: EmailService,
     private readonly i18n: I18nService,
@@ -35,14 +37,26 @@ export class FileService {
   // shareId is optional -> can be used to overwrite a storage provider
   private getStorageService(
     storageProvider?: string,
-  ): S3FileService | LocalFileService {
-    if (storageProvider != undefined)
-      return storageProvider == "S3"
-        ? this.s3FileService
-        : this.localFileService;
-    return this.configService.get("s3.enabled")
-      ? this.s3FileService
-      : this.localFileService;
+  ): S3FileService | LocalFileService | GoogleDriveFileService {
+    const provider = storageProvider ?? this.resolveNewShareProvider();
+    if (provider === "S3") return this.s3FileService;
+    if (provider === "GOOGLE_DRIVE") return this.googleDriveFileService;
+    return this.localFileService;
+  }
+
+  resolveNewShareProvider(): "LOCAL" | "S3" | "GOOGLE_DRIVE" {
+    const drive = this.configService.get("googledrive.enabled");
+    const s3 = this.configService.get("s3.enabled");
+    if (drive && s3) {
+      throw new BadRequestException(this.i18n.t("file.driveAndS3"));
+    }
+    if (drive) return "GOOGLE_DRIVE";
+    if (s3) return "S3";
+    return "LOCAL";
+  }
+
+  cleanupStaleDriveUploads() {
+    return this.googleDriveFileService.cleanupStaleUploads();
   }
 
   async create(
@@ -55,7 +69,13 @@ export class FileService {
     shareId: string,
   ) {
     await this.touchShare(shareId);
-    const storageService = this.getStorageService();
+    const share = await this.prisma.share.findFirst({
+      where: { id: shareId },
+      select: { storageProvider: true },
+    });
+    const storageService = this.getStorageService(
+      share?.storageProvider || this.resolveNewShareProvider(),
+    );
     return storageService.create(data, chunk, file, shareId);
   }
 
