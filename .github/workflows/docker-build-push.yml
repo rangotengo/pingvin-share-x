@@ -64,6 +64,7 @@ jobs:
           no-cache: true
 
       - name: Make GHCR package public
+        continue-on-error: true
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
