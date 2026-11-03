@@ -40,3 +40,5 @@ The share UI is unchanged. The server forwards chunks to a Drive resumable sessi
 Keep the data volume. On start, `prisma migrate deploy` adds `File.providerFileId` and `DriveUpload`. Old shares are not moved.
 
 A foreign folder ID fails under `drive.file`. Clear it and connect again to create a dedicated folder.
+
+Coolify must set `BACKEND_PORT=8080` and keep the data volumes. Do not publish the domain before the first administrator exists. See [Coolify](./coolify.md).

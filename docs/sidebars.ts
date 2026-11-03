@@ -46,6 +46,10 @@ const sidebars: SidebarsConfig = {
         },
         {
           type: "doc",
+          id: "setup/coolify",
+        },
+        {
+          type: "doc",
           id: "setup/upgrading",
         },
       ],

@@ -15,6 +15,7 @@ import { Request, Response } from "express";
 import { AdministratorGuard } from "src/auth/guard/isAdmin.guard";
 import { JwtGuard } from "src/auth/guard/jwt.guard";
 import { ConfigService } from "src/config/config.service";
+import { oauthCallbackAccepted } from "./google-drive.protocol";
 import { GoogleDriveFileService } from "./google-drive.service";
 
 type OauthState = { userId: string; exp: number };
@@ -62,11 +63,14 @@ export class GoogleDriveAdminController {
     const saved = state ? this.states.get(state) : undefined;
     if (state) this.states.delete(state);
     if (
-      error ||
-      !code ||
-      !saved ||
-      saved.exp < Date.now() ||
-      saved.userId !== req.user?.id
+      !oauthCallbackAccepted({
+        error,
+        code,
+        stateUserId: saved?.userId,
+        requestUserId: req.user?.id,
+        exp: saved?.exp,
+        now: Date.now(),
+      })
     ) {
       res.redirect(`${back}?drive=error`);
       return;

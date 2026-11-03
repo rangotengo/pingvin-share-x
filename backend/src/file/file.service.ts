@@ -7,6 +7,7 @@ import {
 } from "@nestjs/common";
 import { CACHE_MANAGER } from "@nestjs/cache-manager";
 import { Cache } from "cache-manager";
+import { selectNewShareProvider } from "./google-drive.protocol";
 import { GoogleDriveFileService } from "./google-drive.service";
 import { LocalFileService } from "./local.service";
 import { S3FileService } from "./s3.service";
@@ -45,14 +46,14 @@ export class FileService {
   }
 
   resolveNewShareProvider(): "LOCAL" | "S3" | "GOOGLE_DRIVE" {
-    const drive = this.configService.get("googledrive.enabled");
-    const s3 = this.configService.get("s3.enabled");
-    if (drive && s3) {
+    try {
+      return selectNewShareProvider(
+        Boolean(this.configService.get("googledrive.enabled")),
+        Boolean(this.configService.get("s3.enabled")),
+      );
+    } catch {
       throw new BadRequestException(this.i18n.t("file.driveAndS3"));
     }
-    if (drive) return "GOOGLE_DRIVE";
-    if (s3) return "S3";
-    return "LOCAL";
   }
 
   cleanupStaleDriveUploads() {

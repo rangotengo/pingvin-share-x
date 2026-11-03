@@ -146,6 +146,30 @@ export function usesBrowserRedirect(provider: string): boolean {
   return provider === "S3";
 }
 
+export function selectNewShareProvider(
+  driveEnabled: boolean,
+  s3Enabled: boolean,
+): "LOCAL" | "S3" | "GOOGLE_DRIVE" {
+  if (driveEnabled && s3Enabled) throw new Error("drive and s3 both enabled");
+  if (driveEnabled) return "GOOGLE_DRIVE";
+  if (s3Enabled) return "S3";
+  return "LOCAL";
+}
+
+/** Google's redirect is a top-level GET. Accept only a fresh state for this admin. */
+export function oauthCallbackAccepted(args: {
+  error?: string;
+  code?: string;
+  stateUserId?: string;
+  requestUserId?: string;
+  exp?: number;
+  now: number;
+}): boolean {
+  if (args.error || !args.code || !args.stateUserId || args.exp == null) return false;
+  if (args.exp < args.now) return false;
+  return args.stateUserId === args.requestUserId;
+}
+
 export function deletionTargets(
   files: { providerFileId: string | null }[],
 ): string[] {

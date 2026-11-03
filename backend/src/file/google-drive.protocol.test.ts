@@ -7,10 +7,12 @@ import {
   classifyChunk,
   contentRange,
   deletionTargets,
-  usesBrowserRedirect,
+  oauthCallbackAccepted,
   planSlices,
   publicDriveStatus,
   redactSecrets,
+  selectNewShareProvider,
+  usesBrowserRedirect,
 } from "./google-drive.protocol.ts";
 
 test("non-final slices stay 8MiB aligned and bounded", () => {
@@ -95,6 +97,30 @@ test("only S3 redirects the browser", () => {
   assert.equal(usesBrowserRedirect("S3"), true);
   assert.equal(usesBrowserRedirect("GOOGLE_DRIVE"), false);
   assert.equal(usesBrowserRedirect("LOCAL"), false);
+});
+
+test("new shares pick one provider and refuse drive plus s3", () => {
+  assert.equal(selectNewShareProvider(false, false), "LOCAL");
+  assert.equal(selectNewShareProvider(false, true), "S3");
+  assert.equal(selectNewShareProvider(true, false), "GOOGLE_DRIVE");
+  assert.throws(() => selectNewShareProvider(true, true));
+});
+
+test("oauth callback accepts only this admin's unexpired state", () => {
+  const now = 1_000_000;
+  const ok = {
+    code: "auth-code",
+    stateUserId: "admin-1",
+    requestUserId: "admin-1",
+    exp: now + 1,
+    now,
+  };
+  assert.equal(oauthCallbackAccepted(ok), true);
+  assert.equal(oauthCallbackAccepted({ ...ok, error: "access_denied" }), false);
+  assert.equal(oauthCallbackAccepted({ ...ok, code: "" }), false);
+  assert.equal(oauthCallbackAccepted({ ...ok, requestUserId: "other" }), false);
+  assert.equal(oauthCallbackAccepted({ ...ok, exp: now - 1 }), false);
+  assert.equal(oauthCallbackAccepted({ ...ok, stateUserId: undefined }), false);
 });
 
 test("cleanup deletes only stored drive file ids", () => {
