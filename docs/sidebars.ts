@@ -50,6 +50,10 @@ const sidebars: SidebarsConfig = {
         },
         {
           type: "doc",
+          id: "setup/mcp",
+        },
+        {
+          type: "doc",
           id: "setup/upgrading",
         },
       ],

@@ -21,6 +21,7 @@ import * as yup from "yup";
 import Meta from "../../components/Meta";
 import LanguagePicker from "../../components/account/LanguagePicker";
 import ThemeSwitcher from "../../components/account/ThemeSwitcher";
+import AgentTokensCard from "../../components/account/AgentTokensCard";
 import showEnableTotpModal from "../../components/account/showEnableTotpModal";
 import { HoverTip } from "../../components/core/HoverTip";
 import useConfig from "../../hooks/config.hook";
@@ -86,9 +87,7 @@ const Account = () => {
       yup.object().shape({
         oldPassword: yup.string().when([], {
           is: () => !!user?.hasPassword,
-          then: (schema) =>
-            schema
-              .required(t("common.error.field-required")),
+          then: (schema) => schema.required(t("common.error.field-required")),
           otherwise: (schema) => schema.notRequired(),
         }),
         password: yup
@@ -112,12 +111,10 @@ const Account = () => {
             t("common.error.password.number"),
           )
           .matches(
-            requireSpecialCharacter
-              ? /[^a-zA-Z0-9]/
-              : /.*/,
+            requireSpecialCharacter ? /[^a-zA-Z0-9]/ : /.*/,
             t("common.error.password.special"),
           )
-          .required(t("common.error.field-required"))
+          .required(t("common.error.field-required")),
       }),
     ),
   });
@@ -128,9 +125,7 @@ const Account = () => {
     },
     validate: yupResolver(
       yup.object().shape({
-        password: yup
-          .string()
-          .required(t("common.error.field-required")),
+        password: yup.string().required(t("common.error.field-required")),
       }),
     ),
   });
@@ -422,6 +417,7 @@ const Account = () => {
             </Tabs.Panel>
           </Tabs>
         </Paper>
+        <AgentTokensCard />
         <Paper withBorder p="xl" mt="lg">
           <Title order={5} mb="xs">
             <FormattedMessage id="account.card.language.title" />

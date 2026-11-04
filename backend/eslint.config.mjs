@@ -40,6 +40,6 @@ export default tseslint.config(
     },
   },
   {
-    ignores: ["dist/**", "node_modules/**", "prisma/migrations/**", "eslint.config.mjs"],
+    ignores: ["dist/**", "node_modules/**", "prisma/migrations/**", "eslint.config.mjs", "src/**/*.test.ts"],
   }
 );

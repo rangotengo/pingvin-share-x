@@ -31,6 +31,7 @@ model User {
   reverseShares       ReverseShare[]
   shareUserRecipients ShareUserRecipient[]
   adminNoticeDismissals AdminNoticeDismissal[]
+  agentTokens         AgentToken[]
 
   totpEnabled        Boolean             @default(false)
   totpVerified       Boolean             @default(false)
@@ -214,4 +215,20 @@ model AdminNoticeDismissal {
   dismissedByUsername String?
   dismissedByUser     User?    @relation(fields: [dismissedByUserId], references: [id], onDelete: SetNull)
 }
+
+model AgentToken {
+  id          String    @id @default(uuid())
+  name        String
+  tokenHash   String    @unique
+  tokenPrefix String
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime?
+  lastUsedAt  DateTime?
+
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
 

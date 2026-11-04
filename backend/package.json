@@ -8,7 +8,9 @@
     "lint": "eslint 'src/**/*.ts'",
     "format": "prettier --end-of-line=auto --write 'src/**/*.ts'",
     "test:system": "prisma migrate reset -f && nest start & wait-on http://localhost:8080/api/configs && npx newman run ./test/newman-system-tests.json",
-    "test:drive": "node --experimental-strip-types --test src/file/google-drive.protocol.test.ts src/file/delete-plan.test.ts src/jobs/temp-files.test.ts"
+    "test:drive": "node --experimental-strip-types --test src/file/google-drive.protocol.test.ts src/file/delete-plan.test.ts src/jobs/temp-files.test.ts",
+    "test:mcp": "node --experimental-strip-types --test src/mcp/mcp.protocol.test.ts",
+    "test": "node --experimental-strip-types --test src/file/google-drive.protocol.test.ts src/file/delete-plan.test.ts src/jobs/temp-files.test.ts src/mcp/mcp.protocol.test.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed/config.seed.ts"
@@ -25,6 +27,7 @@
     "@aws-sdk/client-s3": "^3.1095.0",
     "@aws-sdk/s3-request-presigner": "^3.1095.0",
     "@keyv/redis": "^4.4.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@nestjs/cache-manager": "^3.0.1",
     "@nestjs/common": "^11.2.5",
     "@nestjs/config": "^4.0.2",
