@@ -15,7 +15,11 @@ import { Request, Response } from "express";
 import { AdministratorGuard } from "src/auth/guard/isAdmin.guard";
 import { JwtGuard } from "src/auth/guard/jwt.guard";
 import { ConfigService } from "src/config/config.service";
-import { oauthCallbackAccepted } from "./google-drive.protocol";
+import {
+  connectErrorLog,
+  connectReason,
+  oauthCallbackReason,
+} from "./google-drive.protocol";
 import { GoogleDriveFileService } from "./google-drive.service";
 
 type OauthState = { userId: string; exp: number };
@@ -59,28 +63,34 @@ export class GoogleDriveAdminController {
     @Query("error") error: string,
     @Res() res: Response,
   ) {
-    const back = `${String(this.config.get("general.appUrl") || "").replace(/\/$/, "")}/admin/config/googledrive`;
+    const back = `${String(this.config.get("general.appUrl") || "")
+      .trim()
+      .replace(/\/$/, "")}/admin/config/googledrive`;
     const saved = state ? this.states.get(state) : undefined;
     if (state) this.states.delete(state);
-    if (
-      !oauthCallbackAccepted({
-        error,
-        code,
-        stateUserId: saved?.userId,
-        requestUserId: req.user?.id,
-        exp: saved?.exp,
-        now: Date.now(),
-      })
-    ) {
-      res.redirect(`${back}?drive=error`);
+    const rejected = oauthCallbackReason({
+      error,
+      code,
+      stateUserId: saved?.userId,
+      requestUserId: req.user?.id,
+      exp: saved?.exp,
+      now: Date.now(),
+    });
+    if (rejected) {
+      this.logger.warn(`Google Drive connect rejected: ${rejected}`);
+      res.redirect(`${back}?drive=error&reason=${rejected}`);
       return;
     }
     try {
       await this.drive.connect(code);
       res.redirect(`${back}?drive=connected`);
-    } catch {
-      this.logger.warn("Google Drive connect failed");
-      res.redirect(`${back}?drive=error`);
+    } catch (error) {
+      const detail = connectErrorLog(error);
+      this.logger.warn(`Google Drive connect failed: ${detail}`);
+      const reason = connectReason(detail.split(" ")[0]);
+      res.redirect(
+        reason ? `${back}?drive=error&reason=${reason}` : `${back}?drive=error`,
+      );
     }
   }
 

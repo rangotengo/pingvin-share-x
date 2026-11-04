@@ -7,7 +7,12 @@ import {
   classifyChunk,
   contentRange,
   deletionTargets,
+  connectErrorLog,
+  connectReason,
+  googleFailureReason,
   oauthCallbackAccepted,
+  oauthCallbackReason,
+  safeGoogleDetail,
   planSlices,
   publicDriveStatus,
   redactSecrets,
@@ -33,7 +38,10 @@ test("final slice may be short and closes the upload", () => {
   assert.equal(planned.slices[0].body.length, 150);
   assert.equal(planned.remainder.length, 0);
   assert.equal(contentRange(8, 150, 158), "bytes 8-157/158");
-  assert.equal(contentRange(0, DRIVE_FLUSH, null), `bytes 0-${DRIVE_FLUSH - 1}/*`);
+  assert.equal(
+    contentRange(0, DRIVE_FLUSH, null),
+    `bytes 0-${DRIVE_FLUSH - 1}/*`,
+  );
 });
 
 test("interrupted chunk is resumed, duplicate chunk is ignored", () => {
@@ -104,6 +112,75 @@ test("new shares pick one provider and refuse drive plus s3", () => {
   assert.equal(selectNewShareProvider(false, true), "S3");
   assert.equal(selectNewShareProvider(true, false), "GOOGLE_DRIVE");
   assert.throws(() => selectNewShareProvider(true, true));
+});
+
+test("oauth callback names the reject reason and keeps secrets out of it", () => {
+  const now = 1_000_000;
+  const ok = {
+    code: "auth-code",
+    stateUserId: "admin-1",
+    requestUserId: "admin-1",
+    exp: now + 1,
+    now,
+  };
+  assert.equal(oauthCallbackReason(ok), null);
+  assert.equal(
+    oauthCallbackReason({ ...ok, error: "access_denied" }),
+    "access_denied",
+  );
+  assert.equal(oauthCallbackReason({ ...ok, error: "weird" }), "access_denied");
+  assert.equal(oauthCallbackReason({ ...ok, code: "" }), "missing_code");
+  assert.equal(
+    oauthCallbackReason({ ...ok, stateUserId: undefined }),
+    "state_missing",
+  );
+  assert.equal(oauthCallbackReason({ ...ok, exp: now - 1 }), "state_expired");
+  assert.equal(
+    oauthCallbackReason({ ...ok, requestUserId: "other" }),
+    "state_mismatch",
+  );
+  assert.equal(connectReason("not-a-reason"), null);
+
+  const mismatch = googleFailureReason(
+    {
+      error: "invalid_grant",
+      error_description: "redirect_uri mismatch",
+    },
+    "token_exchange",
+  );
+  assert.equal(mismatch, "redirect_uri_mismatch");
+  assert.equal(
+    googleFailureReason(
+      {
+        error: {
+          errors: [{ reason: "accessNotConfigured" }],
+          message: "Drive API has not been used",
+        },
+      },
+      "folder_failed",
+    ),
+    "access_not_configured",
+  );
+  const leaked = {
+    error: "invalid_client",
+    error_description: "client_secret=super-secret-value Bearer ya29.token",
+  };
+  assert.equal(safeGoogleDetail(leaked), "");
+  assert.equal(
+    safeGoogleDetail({ error_description: "The OAuth client was not found." }),
+    "The OAuth client was not found.",
+  );
+  const leakedError = new Error("invalid_client") as Error & {
+    detail?: string;
+  };
+  leakedError.detail = "client_secret=super-secret-value";
+  assert.equal(connectErrorLog(leakedError), "invalid_client");
+  const safeError = new Error("invalid_client") as Error & { detail?: string };
+  safeError.detail = "The OAuth client was not found.";
+  assert.equal(
+    connectErrorLog(safeError),
+    "invalid_client (The OAuth client was not found.)",
+  );
 });
 
 test("oauth callback accepts only this admin's unexpired state", () => {

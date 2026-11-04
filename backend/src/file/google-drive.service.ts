@@ -18,7 +18,7 @@ import { PrismaService } from "src/prisma/prisma.service";
 import { byteToHumanSizeString } from "src/utils/fileSize.util";
 import { getUserActiveStorageUsage } from "src/utils/storageQuota.util";
 import { validate as isValidUUID } from "uuid";
-import { GoogleDriveClient } from "./google-drive.client";
+import { DriveError, GoogleDriveClient } from "./google-drive.client";
 import {
   assertDriveFileId,
   chunkBytes,
@@ -47,15 +47,15 @@ export class GoogleDriveFileService {
   ) {}
 
   status() {
-    const appUrl = String(this.config.get("general.appUrl") || "").replace(
-      /\/$/,
-      "",
-    );
+    const appUrl = String(this.config.get("general.appUrl") || "")
+      .trim()
+      .replace(/\/$/, "");
+    const creds = this.credentials();
     return publicDriveStatus({
       enabled: this.config.get("googledrive.enabled"),
-      clientId: this.config.get("googledrive.clientId") || "",
-      clientSecret: this.config.get("googledrive.clientSecret") || "",
-      refreshToken: this.config.get("googledrive.refreshToken") || "",
+      clientId: creds.clientId,
+      clientSecret: creds.clientSecret,
+      refreshToken: creds.refreshToken,
       email: this.config.get("googledrive.connectedEmail") || "",
       folderId: this.config.get("googledrive.folderId") || "",
       folderName: this.config.get("googledrive.folderName") || "",
@@ -69,10 +69,13 @@ export class GoogleDriveFileService {
   }
 
   async connect(code: string) {
-    this.assertConfigured();
+    if (!this.configured()) throw new DriveError("not_configured");
     const client = this.getClient();
     const tokens = await client.exchangeCode(code, this.status().redirectUri);
-    await this.config.setInternal("googledrive.refreshToken", tokens.refreshToken);
+    await this.config.setInternal(
+      "googledrive.refreshToken",
+      tokens.refreshToken,
+    );
     this.client = null;
     const connected = this.getClient();
     const email = await connected.userEmail().catch(() => "");
@@ -93,7 +96,9 @@ export class GoogleDriveFileService {
   async disconnect() {
     const refreshToken = this.config.get("googledrive.refreshToken");
     if (refreshToken && this.connected()) {
-      await this.getClient().revoke(refreshToken).catch(() => undefined);
+      await this.getClient()
+        .revoke(refreshToken)
+        .catch(() => undefined);
     }
     await this.config.setInternal("googledrive.refreshToken", null);
     await this.config.setInternal("googledrive.connectedEmail", null);
@@ -124,7 +129,8 @@ export class GoogleDriveFileService {
     const fileMetaData = await this.prisma.file.findFirst({
       where: { id: fileId, shareId },
     });
-    if (!fileMetaData) throw new NotFoundException(this.i18n.t("file.notFound"));
+    if (!fileMetaData)
+      throw new NotFoundException(this.i18n.t("file.notFound"));
     if (!fileMetaData.providerFileId) {
       throw new NotFoundException(this.i18n.t("file.notFound"));
     }
@@ -205,7 +211,9 @@ export class GoogleDriveFileService {
         );
       }
     }
-    const uploads = await this.prisma.driveUpload.findMany({ where: { shareId } });
+    const uploads = await this.prisma.driveUpload.findMany({
+      where: { shareId },
+    });
     await this.cancelUploads(uploads);
     await this.prisma.driveUpload.deleteMany({ where: { shareId } });
   }
@@ -265,12 +273,17 @@ export class GoogleDriveFileService {
 
     const client = this.getClient();
     if (upload?.sessionUri) {
-      const remote = await client.querySession(upload.sessionUri).catch(() => null);
+      const remote = await client
+        .querySession(upload.sessionUri)
+        .catch(() => null);
       if (remote?.complete && remote.fileId) {
         const size = remote.size ?? (await client.fileSize(remote.fileId));
         return this.finish(file, shareId, remote.fileId, size);
       }
-      if (remote && (remote.expired || (remote.bytes === 0 && upload.bytesSent > 0))) {
+      if (
+        remote &&
+        (remote.expired || (remote.bytes === 0 && upload.bytesSent > 0))
+      ) {
         upload = await this.prisma.driveUpload.update({
           where: { id: file.id },
           data: { sessionUri: null, bytesSent: 0, remainder: null },
@@ -283,7 +296,9 @@ export class GoogleDriveFileService {
       }
     }
 
-    const remainder = upload?.remainder ? Buffer.from(upload.remainder) : Buffer.alloc(0);
+    const remainder = upload?.remainder
+      ? Buffer.from(upload.remainder)
+      : Buffer.alloc(0);
     const accepted = (upload?.bytesSent || 0) + remainder.length;
     const chunkSize = this.config.get("share.chunkSize");
     const kind = classifyChunk({
@@ -305,7 +320,12 @@ export class GoogleDriveFileService {
     const incoming = buffer.subarray(skip);
     await this.assertCapacity(shareId, incoming.length, accepted);
 
-    if (isLast && accepted === 0 && incoming.length === 0 && remainder.length === 0) {
+    if (
+      isLast &&
+      accepted === 0 &&
+      incoming.length === 0 &&
+      remainder.length === 0
+    ) {
       const folderId = await this.folderId();
       const driveId = await client.createEmptyFile(
         file.name,
@@ -356,7 +376,10 @@ export class GoogleDriveFileService {
     }
 
     if (fileId || (isLast && planned.slices.length === 0)) {
-      if (!fileId) throw new InternalServerErrorException(this.i18n.t("file.driveUploadFailed"));
+      if (!fileId)
+        throw new InternalServerErrorException(
+          this.i18n.t("file.driveUploadFailed"),
+        );
       return this.finish(file, shareId, fileId, bytesSent);
     }
 
@@ -383,7 +406,11 @@ export class GoogleDriveFileService {
     assertDriveFileId(driveFileId);
     await this.prisma.file.upsert({
       where: { id: file.id },
-      update: { providerFileId: driveFileId, size: size.toString(), name: file.name },
+      update: {
+        providerFileId: driveFileId,
+        size: size.toString(),
+        name: file.name,
+      },
       create: {
         id: file.id,
         name: file.name,
@@ -392,7 +419,9 @@ export class GoogleDriveFileService {
         share: { connect: { id: shareId } },
       },
     });
-    await this.prisma.driveUpload.delete({ where: { id: file.id } }).catch(() => {});
+    await this.prisma.driveUpload
+      .delete({ where: { id: file.id } })
+      .catch(() => {});
     return { id: file.id, name: file.name };
   }
 
@@ -410,7 +439,8 @@ export class GoogleDriveFileService {
 
   private async folderId() {
     const id = this.config.get("googledrive.folderId");
-    if (!id) throw new BadRequestException(this.i18n.t("file.driveFolderInvalid"));
+    if (!id)
+      throw new BadRequestException(this.i18n.t("file.driveFolderInvalid"));
     return id;
   }
 
@@ -431,7 +461,10 @@ export class GoogleDriveFileService {
     if (share.uploadLocked) {
       throw new BadRequestException(this.i18n.t("file.alreadyCompleted"));
     }
-    const fileSizeSum = share.files.reduce((n, item) => n + parseInt(item.size), 0);
+    const fileSizeSum = share.files.reduce(
+      (n, item) => n + parseInt(item.size),
+      0,
+    );
     const projected = fileSizeSum + alreadyBuffered + incoming;
     let limit = parseInt(this.config.get("share.maxSize"));
     if (share.reverseShare?.maxShareSize) {
@@ -463,7 +496,9 @@ export class GoogleDriveFileService {
             ? this.i18n.t("file.reverseShareQuotaExceeded", {
                 args: { exceededSize },
               })
-            : this.i18n.t("file.storageQuotaExceeded", { args: { exceededSize } }),
+            : this.i18n.t("file.storageQuotaExceeded", {
+                args: { exceededSize },
+              }),
           HttpStatus.PAYLOAD_TOO_LARGE,
         );
       }
@@ -513,40 +548,49 @@ export class GoogleDriveFileService {
     return mime.lookup(name) || "application/octet-stream";
   }
 
+  private credentials() {
+    return {
+      clientId: String(this.config.get("googledrive.clientId") || "").trim(),
+      clientSecret: String(
+        this.config.get("googledrive.clientSecret") || "",
+      ).trim(),
+      refreshToken: String(
+        this.config.get("googledrive.refreshToken") || "",
+      ).trim(),
+    };
+  }
+
+  private configured() {
+    const creds = this.credentials();
+    return Boolean(creds.clientId && creds.clientSecret);
+  }
+
   private assertConfigured() {
-    if (!this.config.get("googledrive.clientId") || !this.config.get("googledrive.clientSecret")) {
+    if (!this.configured()) {
       throw new BadRequestException(this.i18n.t("file.driveNotConfigured"));
     }
   }
 
   private assertConnected() {
     this.assertConfigured();
-    if (!this.config.get("googledrive.refreshToken")) {
+    if (!this.credentials().refreshToken) {
       throw new BadRequestException(this.i18n.t("file.driveNotConnected"));
     }
   }
 
   private connected() {
-    return Boolean(
-      this.config.get("googledrive.clientId") &&
-        this.config.get("googledrive.clientSecret") &&
-        this.config.get("googledrive.refreshToken"),
-    );
+    const creds = this.credentials();
+    return Boolean(creds.clientId && creds.clientSecret && creds.refreshToken);
   }
 
   private getClient() {
-    const key = [
-      this.config.get("googledrive.clientId"),
-      this.config.get("googledrive.clientSecret"),
-      this.config.get("googledrive.refreshToken"),
-    ].join("\n");
+    const creds = this.credentials();
+    const key = [creds.clientId, creds.clientSecret, creds.refreshToken].join(
+      "\n",
+    );
     if (!this.client || this.clientKey !== key) {
       this.clientKey = key;
-      this.client = new GoogleDriveClient(fetch, () => ({
-        clientId: this.config.get("googledrive.clientId"),
-        clientSecret: this.config.get("googledrive.clientSecret"),
-        refreshToken: this.config.get("googledrive.refreshToken"),
-      }));
+      this.client = new GoogleDriveClient(fetch, () => this.credentials());
     }
     return this.client;
   }
@@ -569,6 +613,8 @@ export class GoogleDriveFileService {
   }
 
   private safeError(error: unknown) {
-    return redactSecrets(error instanceof Error ? error.message : String(error));
+    return redactSecrets(
+      error instanceof Error ? error.message : String(error),
+    );
   }
 }

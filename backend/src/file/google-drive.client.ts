@@ -3,7 +3,9 @@ import {
   assertUploadSessionUrl,
   bytesFromRangeHeader,
   contentRange,
+  googleFailureReason,
   redactSecrets,
+  safeGoogleDetail,
 } from "./google-drive.protocol";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -15,12 +17,16 @@ export const DRIVE_SCOPE =
   "openid email https://www.googleapis.com/auth/drive.file";
 
 export class DriveError extends Error {
+  readonly detail: string;
+
   constructor(
     message: string,
     readonly status?: number,
+    detail = "",
   ) {
     super(redactSecrets(message));
     this.name = "DriveError";
+    this.detail = redactSecrets(detail).slice(0, 160);
   }
 }
 
@@ -65,7 +71,7 @@ export class GoogleDriveClient {
     });
     const payload = await this.tokenRequest(body);
     if (!payload.refresh_token) {
-      throw new DriveError("Google did not return a refresh token");
+      throw new DriveError("no_refresh_token");
     }
     return {
       refreshToken: payload.refresh_token,
@@ -101,7 +107,11 @@ export class GoogleDriveClient {
     });
     const payload = await this.readJson(response);
     if (!response.ok || !payload.id) {
-      throw new DriveError("folder create failed", response.status);
+      throw new DriveError(
+        googleFailureReason(payload, "folder_failed"),
+        response.status,
+        safeGoogleDetail(payload),
+      );
     }
     return { id: String(payload.id), name: String(payload.name || name) };
   }
@@ -117,12 +127,18 @@ export class GoogleDriveClient {
       },
     );
     const payload = await this.readJson(response);
-    if (!response.ok) throw new DriveError("folder lookup failed", response.status);
+    if (!response.ok) {
+      throw new DriveError(
+        googleFailureReason(payload, "folder_failed"),
+        response.status,
+        safeGoogleDetail(payload),
+      );
+    }
     if (
       payload.mimeType !== "application/vnd.google-apps.folder" ||
       payload.trashed
     ) {
-      throw new DriveError("folder is not a writable Drive folder", response.status);
+      throw new DriveError("folder_failed", response.status);
     }
     return { id: String(payload.id), name: String(payload.name || "") };
   }
@@ -170,7 +186,8 @@ export class GoogleDriveClient {
       throw new DriveError("upload session failed", response.status);
     }
     const location = response.headers.get("location");
-    if (!location) throw new DriveError("upload session missing", response.status);
+    if (!location)
+      throw new DriveError("upload session missing", response.status);
     assertUploadSessionUrl(location);
     return location;
   }
@@ -237,7 +254,11 @@ export class GoogleDriveClient {
     if (response.ok) {
       const payload = await this.readJson(response);
       if (!payload.id) throw new DriveError("upload finished without file id");
-      return { complete: true, fileId: String(payload.id), next: start + body.length };
+      return {
+        complete: true,
+        fileId: String(payload.id),
+        next: start + body.length,
+      };
     }
     throw new DriveError("upload slice failed", response.status);
   }
@@ -248,7 +269,9 @@ export class GoogleDriveClient {
   ): Promise<{ status: number; body: ReadableStream<Uint8Array> | null }> {
     assertDriveFileId(fileId);
     const token = await this.getAccessToken();
-    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+    };
     if (range) headers.Range = `bytes=${range.start}-${range.end}`;
     const response = await this.requestWithRetry(
       `${DRIVE_API}/files/${fileId}?alt=media`,
@@ -285,7 +308,12 @@ export class GoogleDriveClient {
       method: "DELETE",
       signal: AbortSignal.timeout(30_000),
     }).catch(() => null);
-    if (!response || response.ok || response.status === 404 || response.status === 410) {
+    if (
+      !response ||
+      response.ok ||
+      response.status === 404 ||
+      response.status === 410
+    ) {
       return;
     }
   }
@@ -309,7 +337,8 @@ export class GoogleDriveClient {
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(30_000),
     });
-    if (response.status === 404 || response.status === 204 || response.ok) return;
+    if (response.status === 404 || response.status === 204 || response.ok)
+      return;
     throw new DriveError("delete failed", response.status);
   }
 
@@ -355,7 +384,11 @@ export class GoogleDriveClient {
       expires_in?: number;
     };
     if (!response.ok || !payload.access_token) {
-      throw new DriveError("token exchange failed", response.status);
+      throw new DriveError(
+        googleFailureReason(payload, "token_exchange"),
+        response.status,
+        safeGoogleDetail(payload),
+      );
     }
     return {
       access_token: payload.access_token,

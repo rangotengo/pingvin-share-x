@@ -56,7 +56,10 @@ export function contentRange(
     : `bytes ${start}-${end}/${total}`;
 }
 
-export function expectedChunkIndex(accepted: number, chunkSize: number): number {
+export function expectedChunkIndex(
+  accepted: number,
+  chunkSize: number,
+): number {
   if (chunkSize <= 0) throw new Error("invalid chunk size");
   return Math.ceil(accepted / chunkSize);
 }
@@ -105,9 +108,15 @@ export function redactSecrets(input: string): string {
   return input
     .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [redacted]")
     .replace(/upload_id=[^&\s"]+/gi, "upload_id=[redacted]")
-    .replace(/https:\/\/www\.googleapis\.com\/upload\/[^\s"]+/gi, "[upload-session]")
+    .replace(
+      /https:\/\/www\.googleapis\.com\/upload\/[^\s"]+/gi,
+      "[upload-session]",
+    )
+    .replace(/https?:\/\/\S+/gi, "[url]")
     .replace(/refresh_token=[^&\s"]+/gi, "refresh_token=[redacted]")
-    .replace(/client_secret=[^&\s"]+/gi, "client_secret=[redacted]");
+    .replace(/client_secret=[^&\s"]+/gi, "client_secret=[redacted]")
+    .replace(/code=[^&\s"]+/gi, "code=[redacted]")
+    .replace(/GOCSPX-[A-Za-z0-9_-]+/g, "[redacted]");
 }
 
 export type DriveStatus = {
@@ -156,7 +165,55 @@ export function selectNewShareProvider(
   return "LOCAL";
 }
 
-/** Google's redirect is a top-level GET. Accept only a fresh state for this admin. */
+const CONNECT_REASONS = [
+  "access_denied",
+  "invalid_request",
+  "invalid_client",
+  "invalid_grant",
+  "unauthorized_client",
+  "unsupported_grant_type",
+  "invalid_scope",
+  "redirect_uri_mismatch",
+  "no_refresh_token",
+  "not_configured",
+  "state_missing",
+  "state_expired",
+  "state_mismatch",
+  "missing_code",
+  "folder_failed",
+  "access_not_configured",
+  "insufficient_permissions",
+  "token_exchange",
+] as const;
+
+export type ConnectReason = (typeof CONNECT_REASONS)[number];
+
+const CONNECT_REASON_SET = new Set<string>(CONNECT_REASONS);
+
+export function connectReason(
+  value: string | undefined | null,
+): ConnectReason | null {
+  if (!value || !CONNECT_REASON_SET.has(value)) return null;
+  return value as ConnectReason;
+}
+
+/** Google's redirect is a top-level GET. Null means this admin's fresh state is accepted. */
+export function oauthCallbackReason(args: {
+  error?: string;
+  code?: string;
+  stateUserId?: string;
+  requestUserId?: string;
+  exp?: number;
+  now: number;
+}): ConnectReason | null {
+  if (args.error) return connectReason(args.error) ?? "access_denied";
+  if (!args.code) return "missing_code";
+  if (!args.stateUserId) return "state_missing";
+  if (args.exp == null || args.exp < args.now) return "state_expired";
+  if (args.stateUserId !== args.requestUserId) return "state_mismatch";
+  return null;
+}
+
 export function oauthCallbackAccepted(args: {
   error?: string;
   code?: string;
@@ -165,9 +222,75 @@ export function oauthCallbackAccepted(args: {
   exp?: number;
   now: number;
 }): boolean {
-  if (args.error || !args.code || !args.stateUserId || args.exp == null) return false;
-  if (args.exp < args.now) return false;
-  return args.stateUserId === args.requestUserId;
+  return oauthCallbackReason(args) == null;
+}
+
+export function googleFailureReason(
+  payload: unknown,
+  fallback: ConnectReason,
+): ConnectReason {
+  if (!payload || typeof payload !== "object") return fallback;
+  const body = payload as Record<string, unknown>;
+  if (typeof body.error === "string") {
+    const desc =
+      typeof body.error_description === "string" ? body.error_description : "";
+    if (body.error === "invalid_grant" && /redirect_uri/i.test(desc)) {
+      return "redirect_uri_mismatch";
+    }
+    return connectReason(body.error) ?? fallback;
+  }
+  if (body.error && typeof body.error === "object") {
+    const nested = body.error as { errors?: { reason?: string }[] };
+    const code = nested.errors?.find((item) => item?.reason)?.reason || "";
+    if (code === "accessNotConfigured") return "access_not_configured";
+    if (
+      code === "insufficientPermissions" ||
+      code === "insufficientFilePermissions" ||
+      code === "forbidden"
+    ) {
+      return "insufficient_permissions";
+    }
+  }
+  return fallback;
+}
+
+/** Short public Google text only. Never a token, code, or session URL. */
+export function safeGoogleDetail(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "";
+  const body = payload as Record<string, unknown>;
+  let text = "";
+  if (typeof body.error_description === "string") text = body.error_description;
+  else if (body.error && typeof body.error === "object") {
+    const message = (body.error as { message?: unknown }).message;
+    if (typeof message === "string") text = message;
+  }
+  text = redactSecrets(text).replace(/\s+/g, " ").trim().slice(0, 160);
+  if (
+    !text ||
+    /bearer|client_secret|refresh_token|access_token|\[redacted\]|\[url\]/i.test(
+      text,
+    )
+  ) {
+    return "";
+  }
+  return text;
+}
+
+export function connectErrorLog(error: unknown): string {
+  const reason =
+    error instanceof Error
+      ? (connectReason(error.message) ?? "unknown")
+      : "unknown";
+  const detail =
+    error &&
+    typeof error === "object" &&
+    "detail" in error &&
+    typeof (error as { detail?: unknown }).detail === "string"
+      ? safeGoogleDetail({
+          error_description: (error as { detail: string }).detail,
+        })
+      : "";
+  return detail ? `${reason} (${detail})` : reason;
 }
 
 export function deletionTargets(
