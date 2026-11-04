@@ -5,6 +5,8 @@ import { ReverseShareModule } from "src/reverseShare/reverseShare.module";
 import { ShareModule } from "src/share/share.module";
 import { FileController } from "./file.controller";
 import { FileService } from "./file.service";
+import { GoogleDriveAdminController } from "./google-drive.admin.controller";
+import { GoogleDriveFileService } from "./google-drive.service";
 import { LocalFileService } from "./local.service";
 import { S3FileService } from "./s3.service";
 
@@ -15,8 +17,8 @@ import { S3FileService } from "./s3.service";
     ReverseShareModule,
     ShareModule,
   ],
-  controllers: [FileController],
-  providers: [FileService, LocalFileService, S3FileService],
+  controllers: [FileController, GoogleDriveAdminController],
+  providers: [FileService, LocalFileService, S3FileService, GoogleDriveFileService],
   exports: [FileService],
 })
 export class FileModule {}

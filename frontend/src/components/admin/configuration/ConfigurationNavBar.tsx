@@ -15,6 +15,7 @@ import {
   TbAt,
   TbBinaryTree,
   TbBucket,
+  TbCloud,
   TbLock,
   TbMail,
   TbPalette,
@@ -36,6 +37,7 @@ export const categories = [
   { name: "OAuth", icon: <TbSocial /> },
   { name: "LDAP", icon: <TbBinaryTree /> },
   { name: "S3", icon: <TbBucket /> },
+  { name: "Googledrive", icon: <TbCloud /> },
   { name: "Cache", icon: <TbServerBolt /> },
   { name: "Legal", icon: <TbScale /> },
 ];

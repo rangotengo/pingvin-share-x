@@ -13,6 +13,7 @@ const categories = [
   "oauth",
   "ldap",
   "s3",
+  "googledrive",
   "legal",
   "cache",
 ];
@@ -92,6 +93,26 @@ const changeLogo = async (file: File) => {
   await api.post("/configs/admin/logo", form);
 };
 
+const googleDriveStatus = async () => {
+  return (await api.get("/admin/google-drive/status")).data as {
+    enabled: boolean;
+    configured: boolean;
+    connected: boolean;
+    email: string | null;
+    folderId: string | null;
+    folderName: string | null;
+    redirectUri: string;
+  };
+};
+
+const googleDriveConnectUrl = async () => {
+  return (await api.get("/admin/google-drive/connect")).data as { url: string };
+};
+
+const googleDriveDisconnect = async () => {
+  await api.post("/admin/google-drive/disconnect");
+};
+
 const changeDarkLogo = async (file: File) => {
   const form = new FormData();
   form.append("file", file);
@@ -109,4 +130,7 @@ export default {
   isNewReleaseAvailable,
   changeLogo,
   changeDarkLogo,
+  googleDriveStatus,
+  googleDriveConnectUrl,
+  googleDriveDisconnect,
 };

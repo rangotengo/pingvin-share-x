@@ -4,6 +4,10 @@ id: upgrading
 
 # Upgrading
 
+### Google Drive storage
+
+Fork builds that add Google Drive keep existing local and S3 shares. The container runs `prisma migrate deploy` on start, which adds `File.providerFileId` and the `DriveUpload` table. Do not enable Google Drive and S3 together. See [Google Drive](./google-drive.md).
+
 ### Upgrade to a new version
 
 As Pingvin Share X is in active development, see the release notes for breaking changes before upgrading.

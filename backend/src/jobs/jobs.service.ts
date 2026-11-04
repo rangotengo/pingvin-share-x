@@ -2,11 +2,13 @@ import { Injectable, Logger } from "@nestjs/common";
 import { Cron } from "@nestjs/schedule";
 import * as fs from "fs";
 import * as moment from "moment";
+import { isRecordMissing } from "src/file/delete-plan";
 import { FileService } from "src/file/file.service";
 import { PrismaService } from "src/prisma/prisma.service";
 import { ReverseShareService } from "src/reverseShare/reverseShare.service";
 import { ConfigService } from "src/config/config.service";
 import { SHARE_DIRECTORY } from "../constants";
+import { staleTempChunkPaths } from "./temp-files";
 
 @Injectable()
 export class JobsService {
@@ -43,15 +45,13 @@ export class JobsService {
       },
     });
 
+    let deleted = 0;
     for (const expiredShare of expiredShares) {
-      await this.fileService.deleteAllFiles(expiredShare.id);
-      await this.prisma.share.delete({
-        where: { id: expiredShare.id },
-      });
+      if (await this.deleteStoredShare(expiredShare.id)) deleted++;
     }
 
-    if (expiredShares.length > 0) {
-      this.logger.log(`Deleted ${expiredShares.length} expired shares`);
+    if (deleted > 0) {
+      this.logger.log(`Deleted ${deleted} expired shares`);
     }
   }
 
@@ -87,48 +87,46 @@ export class JobsService {
       },
     });
 
+    let deleted = 0;
     for (const unfinishedShare of unfinishedShares) {
-      await this.fileService.deleteAllFiles(unfinishedShare.id);
-      await this.prisma.share.delete({
-        where: { id: unfinishedShare.id },
-      });
+      if (await this.deleteStoredShare(unfinishedShare.id)) deleted++;
     }
 
-    if (unfinishedShares.length > 0) {
-      this.logger.log(`Deleted ${unfinishedShares.length} unfinished shares`);
+    if (deleted > 0) {
+      this.logger.log(`Deleted ${deleted} unfinished shares`);
+    }
+  }
+
+  private async deleteStoredShare(shareId: string) {
+    try {
+      await this.fileService.deleteAllFiles(shareId);
+      await this.prisma.share
+        .delete({ where: { id: shareId } })
+        .catch((error) => {
+          if (!isRecordMissing(error)) throw error;
+        });
+      return true;
+    } catch (error) {
+      this.logger.error(
+        `Share delete failed for ${shareId}: ${error instanceof Error ? error.message : "unknown"}`,
+      );
+      return false;
+    }
+  }
+
+  @Cron("15 0 * * *")
+  async cleanupStaleDriveUploads() {
+    const removed = await this.fileService.cleanupStaleDriveUploads();
+    if (removed > 0) {
+      this.logger.log(`Deleted ${removed} stale Drive uploads`);
     }
   }
 
   @Cron("0 0 * * *")
   deleteTemporaryFiles() {
-    let filesDeleted = 0;
-
-    const shareDirectories = fs
-      .readdirSync(SHARE_DIRECTORY, { withFileTypes: true })
-      .filter((dirent) => dirent.isDirectory())
-      .map((dirent) => dirent.name);
-
-    for (const shareDirectory of shareDirectories) {
-      const temporaryFiles = fs
-        .readdirSync(`${SHARE_DIRECTORY}/${shareDirectory}`)
-        .filter((file) => file.endsWith(".tmp-chunk"));
-
-      for (const file of temporaryFiles) {
-        const stats = fs.statSync(
-          `${SHARE_DIRECTORY}/${shareDirectory}/${file}`,
-        );
-        const isOlderThanOneDay = moment(stats.mtime)
-          .add(1, "day")
-          .isBefore(moment());
-
-        if (isOlderThanOneDay) {
-          fs.rmSync(`${SHARE_DIRECTORY}/${shareDirectory}/${file}`);
-          filesDeleted++;
-        }
-      }
-    }
-
-    this.logger.log(`Deleted ${filesDeleted} temporary files`);
+    const stale = staleTempChunkPaths(SHARE_DIRECTORY, 24 * 60 * 60 * 1000);
+    for (const path of stale) fs.rmSync(path);
+    this.logger.log(`Deleted ${stale.length} temporary files`);
   }
 
   @Cron("1 * * * *")

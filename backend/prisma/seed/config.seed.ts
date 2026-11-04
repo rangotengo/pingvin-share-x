@@ -518,6 +518,47 @@ export const configVariables = {
       defaultValue: "true",
     },
   },
+  googledrive: {
+    enabled: {
+      type: "boolean",
+      defaultValue: "false",
+      secret: false,
+    },
+    clientId: {
+      type: "string",
+      defaultValue: "",
+      secret: true,
+    },
+    clientSecret: {
+      type: "string",
+      defaultValue: "",
+      obscured: true,
+      secret: true,
+    },
+    folderId: {
+      type: "string",
+      defaultValue: "",
+      secret: true,
+    },
+    folderName: {
+      type: "string",
+      defaultValue: "Pingvin Share",
+      secret: false,
+    },
+    refreshToken: {
+      type: "string",
+      defaultValue: "",
+      obscured: true,
+      secret: true,
+      locked: true,
+    },
+    connectedEmail: {
+      type: "string",
+      defaultValue: "",
+      secret: true,
+      locked: true,
+    },
+  },
   legal: {
     enabled: {
       type: "boolean",

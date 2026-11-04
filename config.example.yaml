@@ -293,6 +293,18 @@ s3:
   secret: ""
   #Turn off for backends that do not support checksum (e.g. B2).
   useChecksum: "true"
+googledrive:
+  #Store new shares in one private Google Drive folder instead of local disk or S3.
+  #Do not enable this together with s3.enabled.
+  enabled: "false"
+  #OAuth client ID from Google Cloud. Drive API must be enabled.
+  clientId: ""
+  #OAuth client secret. Never commit a real value.
+  clientSecret: ""
+  #Optional folder ID created by this app. Leave blank to create "Pingvin Share" on connect.
+  folderId: ""
+  #Folder name used when folderId is blank.
+  folderName: Pingvin Share
 legal:
   #Whether to show a link to imprint and privacy policy in the footer.
   enabled: "false"
