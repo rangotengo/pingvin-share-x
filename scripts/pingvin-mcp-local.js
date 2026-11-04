@@ -9,6 +9,8 @@
  *
  * Reads local agent-side files from disk and streams bounded chunks to remote Pingvin Share,
  * returning the ready share link without loading whole multi-GB files into the LLM context.
+ *
+ * Zero external npm dependencies: runs on clean checkout with Node.js >= 18 built-ins.
  */
 
 const fs = require("node:fs");
@@ -67,14 +69,42 @@ function collectFiles(inputPaths) {
     if (!fs.existsSync(resolved)) {
       throw new Error(`Path does not exist: ${inputPath}`);
     }
-    const stat = fs.statSync(resolved);
-    if (stat.isDirectory()) {
+    const realRoot = fs.realpathSync(resolved);
+    const rootStat = fs.statSync(resolved);
+
+    if (rootStat.isDirectory()) {
       function walkDir(currentDir, relativePrefix) {
         const entries = fs.readdirSync(currentDir, { withFileTypes: true });
         for (const entry of entries) {
           const entryPath = path.join(currentDir, entry.name);
           const relPath = path.join(relativePrefix, entry.name);
-          if (entry.isDirectory()) {
+          const lstat = fs.lstatSync(entryPath);
+
+          if (lstat.isSymbolicLink()) {
+            try {
+              const realEntryPath = fs.realpathSync(entryPath);
+              // Disallow symlinks escaping the directory root
+              const relativeToRoot = path.relative(realRoot, realEntryPath);
+              if (
+                relativeToRoot.startsWith("..") ||
+                path.isAbsolute(relativeToRoot)
+              ) {
+                continue;
+              }
+              const targetStat = fs.statSync(realEntryPath);
+              if (targetStat.isDirectory()) {
+                walkDir(realEntryPath, relPath);
+              } else if (targetStat.isFile()) {
+                result.push({
+                  absolutePath: realEntryPath,
+                  shareName: relPath.replace(/\\/g, "/"),
+                  size: targetStat.size,
+                });
+              }
+            } catch {
+              continue; // Broken symlink, ignore
+            }
+          } else if (entry.isDirectory()) {
             walkDir(entryPath, relPath);
           } else if (entry.isFile()) {
             const fstat = fs.statSync(entryPath);
@@ -87,15 +117,24 @@ function collectFiles(inputPaths) {
         }
       }
       walkDir(resolved, path.basename(resolved));
-    } else if (stat.isFile()) {
+    } else if (rootStat.isFile()) {
       result.push({
         absolutePath: resolved,
         shareName: path.basename(resolved),
-        size: stat.size,
+        size: rootStat.size,
       });
     }
   }
   return result;
+}
+
+// Generate stable deterministic UUID derived from shareId, relative name, and file size
+function getStableFileId(shareId, shareName, size) {
+  const hash = crypto
+    .createHash("sha256")
+    .update(`${shareId}:${shareName}:${size}`)
+    .digest("hex");
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
 }
 
 async function sendMcpRequest(serverUrl, token, sessionId, method, params) {
@@ -144,109 +183,173 @@ async function sendMcpRequest(serverUrl, token, sessionId, method, params) {
     resJson = JSON.parse(rawText);
   }
   if (resJson.error) {
-    throw new Error(`MCP protocol error: ${resJson.error.message || JSON.stringify(resJson.error)}`);
+    throw new Error(
+      `MCP protocol error: ${resJson.error.message || JSON.stringify(resJson.error)}`,
+    );
   }
 
   return { result: resJson.result, sessionId: nextSessionId };
 }
 
-async function uploadFilesToPingvin(config) {
-  const { url, token, paths, name, description, expiration, password, maxViews, onProgress } = config;
+function parseToolResponse(toolRes, actionName) {
+  if (!toolRes || !toolRes.result) {
+    throw new Error(`${actionName} returned empty or invalid response`);
+  }
+  const content = toolRes.result.content;
+  const text =
+    Array.isArray(content) && content[0]?.text ? content[0].text : "";
+  if (toolRes.result.isError) {
+    throw new Error(`${actionName} failed: ${text || "Unknown error"}`);
+  }
+  return text;
+}
 
-  if (!url) throw new Error("Pingvin server URL required (set PINGVIN_URL or pass --url)");
-  if (!token) throw new Error("Pingvin agent token required (set PINGVIN_TOKEN or pass --token)");
-  if (!paths || paths.length === 0) throw new Error("At least one file path is required");
+async function uploadFilesToPingvin(config) {
+  const {
+    url,
+    token,
+    paths,
+    name,
+    description,
+    expiration,
+    password,
+    maxViews,
+    onProgress,
+  } = config;
+
+  if (!url)
+    throw new Error(
+      "Pingvin server URL required (set PINGVIN_URL or pass --url)",
+    );
+  if (!token)
+    throw new Error(
+      "Pingvin agent token required (set PINGVIN_TOKEN or pass --token)",
+    );
+  if (!paths || paths.length === 0)
+    throw new Error("At least one file path is required");
 
   const files = collectFiles(paths);
   if (files.length === 0) {
     throw new Error("No files found to upload");
   }
 
-  // 1. Initialize MCP session
-  const initRes = await sendMcpRequest(url, token, null, "initialize", {
-    protocolVersion: "2024-11-05",
-    capabilities: {},
-    clientInfo: { name: "pingvin-mcp-local-helper", version: "2.1.0" },
-  });
-  const sessionId = initRes.sessionId;
+  let shareId = null;
+  let sessionId = null;
 
-  // 2. Create share via remote tool
-  const createRes = await sendMcpRequest(url, token, sessionId, "tools/call", {
-    name: "pingvin_create_share",
-    arguments: {
-      name: name || undefined,
-      description: description || undefined,
-      expiration: expiration || undefined,
-      password: password || undefined,
-      maxViews: maxViews || undefined,
-    },
-  });
+  try {
+    // 1. Initialize MCP session
+    const initRes = await sendMcpRequest(url, token, null, "initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "pingvin-mcp-local-helper", version: "2.1.0" },
+    });
+    sessionId = initRes.sessionId;
 
-  const createText = createRes.result.content[0].text;
-  if (createRes.result.isError) {
-    throw new Error(`Failed to create share: ${createText}`);
-  }
-  const shareData = JSON.parse(createText);
+    // 2. Create share via remote tool
+    const createRes = await sendMcpRequest(
+      url,
+      token,
+      sessionId,
+      "tools/call",
+      {
+        name: "pingvin_create_share",
+        arguments: {
+          name: name || undefined,
+          description: description || undefined,
+          expiration: expiration || undefined,
+          password: password || undefined,
+          maxViews: maxViews || undefined,
+        },
+      },
+    );
 
-  const shareId = shareData.shareId;
-  const chunkSize = shareData.chunkSize || 5 * 1024 * 1024; // 5MB default
+    const createText = parseToolResponse(createRes, "pingvin_create_share");
+    const shareData = JSON.parse(createText);
 
-  // 3. Upload each file in streaming chunks
-  for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
-    const file = files[fileIndex];
-    const fileId = crypto.randomUUID();
-    const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
+    shareId = shareData.shareId;
+    const chunkSize = shareData.chunkSize || 5 * 1024 * 1024; // 5MB default
 
-    const fd = fs.openSync(file.absolutePath, "r");
-    try {
-      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-        const buffer = Buffer.alloc(Math.min(chunkSize, file.size - chunkIndex * chunkSize));
-        fs.readSync(fd, buffer, 0, buffer.length, chunkIndex * chunkSize);
-        const dataBase64 = buffer.toString("base64");
+    // 3. Upload each file in streaming chunks
+    for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
+      const file = files[fileIndex];
+      const fileId = getStableFileId(shareId, file.shareName, file.size);
+      const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
 
-        const chunkRes = await sendMcpRequest(url, token, sessionId, "tools/call", {
-          name: "pingvin_upload_chunk",
-          arguments: {
-            shareId,
-            name: file.shareName,
-            fileId,
-            chunkIndex,
-            totalChunks,
-            dataBase64,
-          },
-        });
+      const fd = fs.openSync(file.absolutePath, "r");
+      try {
+        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+          const buffer = Buffer.alloc(
+            Math.min(chunkSize, file.size - chunkIndex * chunkSize),
+          );
+          fs.readSync(fd, buffer, 0, buffer.length, chunkIndex * chunkSize);
+          const dataBase64 = buffer.toString("base64");
 
-        if (chunkRes.result.isError) {
-          throw new Error(`Chunk upload failed: ${chunkRes.result.content[0].text}`);
+          const chunkRes = await sendMcpRequest(
+            url,
+            token,
+            sessionId,
+            "tools/call",
+            {
+              name: "pingvin_upload_chunk",
+              arguments: {
+                shareId,
+                name: file.shareName,
+                fileId,
+                chunkIndex,
+                totalChunks,
+                dataBase64,
+              },
+            },
+          );
+
+          parseToolResponse(chunkRes, "pingvin_upload_chunk");
+
+          if (onProgress) {
+            onProgress({
+              fileIndex,
+              totalFiles: files.length,
+              fileName: file.shareName,
+              chunkIndex,
+              totalChunks,
+            });
+          }
         }
-
-        if (onProgress) {
-          onProgress({
-            fileIndex,
-            totalFiles: files.length,
-            fileName: file.shareName,
-            chunkIndex,
-            totalChunks,
-          });
-        }
+      } finally {
+        fs.closeSync(fd);
       }
-    } finally {
-      fs.closeSync(fd);
     }
+
+    // 4. Complete share and get public shareable link
+    const completeRes = await sendMcpRequest(
+      url,
+      token,
+      sessionId,
+      "tools/call",
+      {
+        name: "pingvin_complete_share",
+        arguments: { shareId },
+      },
+    );
+
+    const completeText = parseToolResponse(
+      completeRes,
+      "pingvin_complete_share",
+    );
+    return JSON.parse(completeText);
+  } catch (err) {
+    if (shareId && sessionId) {
+      // Clean up incomplete remote share on failure
+      try {
+        await sendMcpRequest(url, token, sessionId, "tools/call", {
+          name: "pingvin_cancel_share",
+          arguments: { shareId },
+        });
+      } catch {
+        // Ignore error during cancellation unwind
+      }
+    }
+    throw err;
   }
-
-  // 4. Complete share and get public shareable link
-  const completeRes = await sendMcpRequest(url, token, sessionId, "tools/call", {
-    name: "pingvin_complete_share",
-    arguments: { shareId },
-  });
-
-  const completeText = completeRes.result.content[0].text;
-  if (completeRes.result.isError) {
-    throw new Error(`Share completion failed: ${completeText}`);
-  }
-
-  return JSON.parse(completeText);
 }
 
 // Stdio MCP Server mode
@@ -295,7 +398,8 @@ function runStdioServer(serverUrl, token) {
                     paths: {
                       type: "array",
                       items: { type: "string" },
-                      description: "List of local file or directory paths on this machine",
+                      description:
+                        "List of local file or directory paths on this machine",
                     },
                     name: {
                       type: "string",
@@ -307,7 +411,8 @@ function runStdioServer(serverUrl, token) {
                     },
                     expiration: {
                       type: "string",
-                      description: "Optional expiration timespan (e.g. '1d', '7d', 'never')",
+                      description:
+                        "Optional expiration timespan (e.g. '1d', '7d', 'never')",
                     },
                     password: {
                       type: "string",
@@ -341,7 +446,12 @@ function runStdioServer(serverUrl, token) {
               jsonrpc: "2.0",
               id,
               result: {
-                content: [{ type: "text", text: JSON.stringify(uploadResult, null, 2) }],
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify(uploadResult, null, 2),
+                  },
+                ],
               },
             });
           } catch (err) {
@@ -350,7 +460,12 @@ function runStdioServer(serverUrl, token) {
               id,
               result: {
                 isError: true,
-                content: [{ type: "text", text: `Upload failed: ${err.message || String(err)}` }],
+                content: [
+                  {
+                    type: "text",
+                    text: `Upload failed: ${err.message || String(err)}`,
+                  },
+                ],
               },
             });
           }
@@ -380,7 +495,9 @@ function runStdioServer(serverUrl, token) {
 async function runCli(options) {
   if (options.command === "upload" || options.paths.length > 0) {
     try {
-      console.log(`Uploading ${options.paths.length} path(s) to ${options.url}...`);
+      console.log(
+        `Uploading ${options.paths.length} path(s) to ${options.url}...`,
+      );
       const result = await uploadFilesToPingvin({
         ...options,
         onProgress: (p) => {
@@ -413,6 +530,8 @@ if (require.main === module) {
 
 module.exports = {
   collectFiles,
+  getStableFileId,
+  parseToolResponse,
   uploadFilesToPingvin,
   sendMcpRequest,
 };

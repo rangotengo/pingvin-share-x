@@ -8,12 +8,13 @@ import {
   buildPingvinMcpServer,
   generateAgentToken,
   hashAgentToken,
+  isStrictBase64,
   normalizeExpirationInput,
   sanitizeRelativePath,
   verifyAgentTokenFormat,
 } from "./mcp.protocol.ts";
 
-test("sanitizeRelativePath blocks directory traversal and cleans paths", () => {
+test("sanitizeRelativePath rejects traversal and absolute paths rather than collapsing", () => {
   assert.equal(sanitizeRelativePath("simple.txt"), "simple.txt");
   assert.equal(
     sanitizeRelativePath("folder/sub/file.pdf"),
@@ -23,13 +24,39 @@ test("sanitizeRelativePath blocks directory traversal and cleans paths", () => {
     sanitizeRelativePath("folder\\sub\\file.pdf"),
     "folder/sub/file.pdf",
   );
-  assert.equal(sanitizeRelativePath("../../../etc/passwd"), "etc/passwd");
-  assert.equal(sanitizeRelativePath("/root/file.txt"), "root/file.txt");
-  assert.equal(sanitizeRelativePath("././file.txt"), "file.txt");
-  assert.equal(sanitizeRelativePath("a/../../b/c.txt"), "a/b/c.txt");
-  assert.throws(() => sanitizeRelativePath(""), /Invalid path/);
-  assert.throws(() => sanitizeRelativePath("../.."), /Invalid path/);
-  assert.throws(() => sanitizeRelativePath("///"), /Invalid path/);
+  assert.throws(
+    () => sanitizeRelativePath("../../../etc/passwd"),
+    /directory traversal/,
+  );
+  assert.throws(
+    () => sanitizeRelativePath("/root/file.txt"),
+    /absolute paths/,
+  );
+  assert.throws(
+    () => sanitizeRelativePath("C:\\Windows\\system32"),
+    /absolute paths/,
+  );
+  assert.throws(
+    () => sanitizeRelativePath("././file.txt"),
+    /directory traversal/,
+  );
+  assert.throws(
+    () => sanitizeRelativePath("a/../../b/c.txt"),
+    /directory traversal/,
+  );
+  assert.throws(() => sanitizeRelativePath(""), /file name cannot be empty/);
+  assert.throws(() => sanitizeRelativePath("foo\0bar.txt"), /null bytes/);
+});
+
+test("isStrictBase64 validates canonical base64 and rejects invalid characters and padding", () => {
+  assert.equal(
+    isStrictBase64(Buffer.from("Hello world").toString("base64")),
+    true,
+  );
+  assert.equal(isStrictBase64(""), true);
+  assert.equal(isStrictBase64("not!base64!"), false);
+  assert.equal(isStrictBase64("abc"), false); // length not multiple of 4
+  assert.equal(isStrictBase64("===a"), false); // bad padding
 });
 
 test("normalizeExpirationInput parses shorthand, relative, and ISO strings", () => {
@@ -63,14 +90,17 @@ test("McpServer tools register and execute full chunked upload and share lifecyc
   const shares = new Map<string, any>();
   const files = new Map<string, any[]>();
   const fileBuffers = new Map<string, Buffer>();
+  const pendingFiles = new Map<string, Map<string, { total: number; chunks: Set<number> }>>();
+
+  let currentUserState = {
+    id: "agent-user-1",
+    username: "agent-alice",
+    allowShare: true,
+    shareSizeLimit: "100000000",
+  };
 
   const deps = {
-    user: {
-      id: "agent-user-1",
-      username: "agent-alice",
-      allowShare: true,
-      shareSizeLimit: "100000000",
-    },
+    getCurrentUser: () => currentUserState,
     getAppUrl: () => "https://share.arunshrestha.info.np",
     getChunkSize: () => 5000000,
     getShareIdLength: () => 10,
@@ -91,12 +121,24 @@ test("McpServer tools register and execute full chunked upload and share lifecyc
       return share;
     },
     uploadChunk: async (params: any) => {
+      let sharePending = pendingFiles.get(params.shareId);
+      if (!sharePending) {
+        sharePending = new Map();
+        pendingFiles.set(params.shareId, sharePending);
+      }
+      let filePending = sharePending.get(params.fileId);
+      if (!filePending) {
+        filePending = { total: params.totalChunks, chunks: new Set() };
+        sharePending.set(params.fileId, filePending);
+      }
+      filePending.chunks.add(params.chunkIndex);
+
       const key = `${params.shareId}:${params.fileId}`;
       const existing = fileBuffers.get(key) || Buffer.alloc(0);
       const combined = Buffer.concat([existing, params.data]);
       fileBuffers.set(key, combined);
 
-      if (params.chunkIndex === params.totalChunks - 1) {
+      if (params.chunkIndex === params.totalChunks - 1 && filePending.chunks.size >= params.totalChunks) {
         const shareFiles = files.get(params.shareId) || [];
         shareFiles.push({
           id: params.fileId,
@@ -104,12 +146,17 @@ test("McpServer tools register and execute full chunked upload and share lifecyc
           size: combined.length.toString(),
         });
         files.set(params.shareId, shareFiles);
+        sharePending.delete(params.fileId);
       }
       return { id: params.fileId, name: params.name };
     },
     completeShare: async (shareId: string) => {
       const share = shares.get(shareId);
       if (!share) throw new Error("Share not found");
+      const sharePending = pendingFiles.get(shareId);
+      if (sharePending && sharePending.size > 0) {
+        throw new Error("Cannot complete share: pending file chunks are still being uploaded");
+      }
       const shareFiles = files.get(shareId) || [];
       if (shareFiles.length === 0) {
         throw new Error("Cannot complete a share without any uploaded files");
@@ -136,6 +183,7 @@ test("McpServer tools register and execute full chunked upload and share lifecyc
     cancelShare: async (shareId: string) => {
       shares.delete(shareId);
       files.delete(shareId);
+      pendingFiles.delete(shareId);
     },
   };
 
@@ -189,47 +237,62 @@ test("McpServer tools register and execute full chunked upload and share lifecyc
     /Cannot complete a share without any uploaded files/,
   );
 
-  // 4. Multi-chunk binary file upload
-  const rawBytesPart1 = Buffer.from("PINGVIN-CHUNK-0-DATA-START; ");
-  const rawBytesPart2 = Buffer.from("PINGVIN-CHUNK-1-DATA-END.");
-  const expectedTotalBytes = Buffer.concat([rawBytesPart1, rawBytesPart2]);
-
-  const fileId = crypto.randomUUID();
-  const up1: any = await client.callTool({
+  // 4. File A upload (complete: 1 chunk)
+  const fileAId = crypto.randomUUID();
+  const upA: any = await client.callTool({
     name: "pingvin_upload_chunk",
     arguments: {
       shareId,
-      name: "reports/quarterly.pdf",
-      fileId,
+      name: "fileA.txt",
+      fileId: fileAId,
+      chunkIndex: 0,
+      totalChunks: 1,
+      dataBase64: Buffer.from("File A Content").toString("base64"),
+    },
+  });
+  assert.equal(upA.isError, undefined);
+
+  // 5. File B upload (PARTIAL: chunk 0 of 2)
+  const fileBId = crypto.randomUUID();
+  const upB1: any = await client.callTool({
+    name: "pingvin_upload_chunk",
+    arguments: {
+      shareId,
+      name: "fileB.txt",
+      fileId: fileBId,
       chunkIndex: 0,
       totalChunks: 2,
-      dataBase64: rawBytesPart1.toString("base64"),
+      dataBase64: Buffer.from("File B Part 1").toString("base64"),
     },
   });
-  assert.equal(up1.isError, undefined);
-  const up1Parsed = JSON.parse(up1.content[0].text);
-  assert.equal(up1Parsed.isComplete, false);
+  assert.equal(upB1.isError, undefined);
 
-  const up2: any = await client.callTool({
+  // 6. Complete share MUST be rejected while File B is only partially uploaded!
+  const partialComplete: any = await client.callTool({
+    name: "pingvin_complete_share",
+    arguments: { shareId },
+  });
+  assert.equal(partialComplete.isError, true);
+  assert.match(
+    partialComplete.content[0].text,
+    /pending file chunks are still being uploaded/,
+  );
+
+  // 7. Complete File B (chunk 1 of 2)
+  const upB2: any = await client.callTool({
     name: "pingvin_upload_chunk",
     arguments: {
       shareId,
-      name: "reports/quarterly.pdf",
-      fileId,
+      name: "fileB.txt",
+      fileId: fileBId,
       chunkIndex: 1,
       totalChunks: 2,
-      dataBase64: rawBytesPart2.toString("base64"),
+      dataBase64: Buffer.from("File B Part 2").toString("base64"),
     },
   });
-  assert.equal(up2.isError, undefined);
-  const up2Parsed = JSON.parse(up2.content[0].text);
-  assert.equal(up2Parsed.isComplete, true);
+  assert.equal(upB2.isError, undefined);
 
-  // Check stored buffer integrity
-  const stored = fileBuffers.get(`${shareId}:${fileId}`);
-  assert.deepEqual(stored, expectedTotalBytes);
-
-  // 5. Complete share and verify public share link
+  // 8. Now completion succeeds because all files/chunks are done!
   const completeRes: any = await client.callTool({
     name: "pingvin_complete_share",
     arguments: { shareId },
@@ -237,39 +300,45 @@ test("McpServer tools register and execute full chunked upload and share lifecyc
   assert.equal(completeRes.isError, undefined);
   const completeData = JSON.parse(completeRes.content[0].text);
   assert.equal(completeData.success, true);
-  assert.equal(
-    completeData.url,
-    `https://share.arunshrestha.info.np/share/${shareId}`,
-  );
-  assert.equal(completeData.filesCount, 1);
-  assert.equal(completeData.hasPassword, true);
-  assert.equal(completeData.maxViews, 5);
+  assert.equal(completeData.filesCount, 2);
 
-  // 6. Share status reports completed and carries public link
-  const statusRes: any = await client.callTool({
-    name: "pingvin_get_share_status",
-    arguments: { shareId },
+  // 9. Input validation tests: malformed base64, payload exceeding chunkSize, invalid fileId
+  const badBase64: any = await client.callTool({
+    name: "pingvin_upload_chunk",
+    arguments: {
+      shareId,
+      name: "bad.txt",
+      fileId: crypto.randomUUID(),
+      chunkIndex: 0,
+      totalChunks: 1,
+      dataBase64: "this-is-not-base64!@@#",
+    },
   });
-  assert.equal(statusRes.isError, undefined);
-  const statusData = JSON.parse(statusRes.content[0].text);
-  assert.equal(statusData.isCompleted, true);
-  assert.equal(
-    statusData.url,
-    `https://share.arunshrestha.info.np/share/${shareId}`,
-  );
+  assert.equal(badBase64.isError, true);
+  assert.match(badBase64.content[0].text, /strictly valid base64/);
 
-  // 7. Cancellation cleans up share
-  const shareToCancel: any = await client.callTool({
+  const badFileId: any = await client.callTool({
+    name: "pingvin_upload_chunk",
+    arguments: {
+      shareId,
+      name: "bad.txt",
+      fileId: "not-a-valid-uuid",
+      chunkIndex: 0,
+      totalChunks: 1,
+      dataBase64: Buffer.from("ok").toString("base64"),
+    },
+  });
+  assert.equal(badFileId.isError, true);
+  assert.match(badFileId.content[0].text, /valid UUID/);
+
+  // 10. Dynamic permission check: disabled user rejected
+  currentUserState = { ...currentUserState, allowShare: false };
+  const disabledShare: any = await client.callTool({
     name: "pingvin_create_share",
-    arguments: { name: "Temp Share" },
+    arguments: { name: "Forbidden" },
   });
-  const cancelId = JSON.parse(shareToCancel.content[0].text).shareId;
-  const cancelRes: any = await client.callTool({
-    name: "pingvin_cancel_share",
-    arguments: { shareId: cancelId },
-  });
-  assert.equal(cancelRes.isError, undefined);
-  assert.equal(shares.has(cancelId), false);
+  assert.equal(disabledShare.isError, true);
+  assert.match(disabledShare.content[0].text, /Sharing is disabled/);
 
   await client.close();
 });

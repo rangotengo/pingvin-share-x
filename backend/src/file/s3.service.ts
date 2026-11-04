@@ -45,6 +45,7 @@ export class S3FileService {
     string,
     {
       uploadId: string;
+      shareId?: string;
       parts: Array<{ ETag: string | undefined; PartNumber: number }>;
       uploadedBytes: number;
     }
@@ -81,26 +82,29 @@ export class S3FileService {
     });
 
     try {
-      // Initialize multipart upload if it's the first chunk
+      // Initialize multipart upload if it's the first chunk and not already initialized
       if (chunk.index === 0) {
-        const multipartInitResponse = await s3Instance.send(
-          new CreateMultipartUploadCommand({
-            Bucket: bucketName,
-            Key: key,
-          }),
-        );
+        if (!this.multipartUploads[file.id]) {
+          const multipartInitResponse = await s3Instance.send(
+            new CreateMultipartUploadCommand({
+              Bucket: bucketName,
+              Key: key,
+            }),
+          );
 
-        const uploadId = multipartInitResponse.UploadId;
-        if (!uploadId) {
-          throw new Error(this.i18n.t("file.s3UploadInitError"));
+          const uploadId = multipartInitResponse.UploadId;
+          if (!uploadId) {
+            throw new Error(this.i18n.t("file.s3UploadInitError"));
+          }
+
+          // Store the uploadId and parts list in memory
+          this.multipartUploads[file.id] = {
+            uploadId,
+            shareId,
+            parts: [],
+            uploadedBytes: 0,
+          };
         }
-
-        // Store the uploadId and parts list in memory
-        this.multipartUploads[file.id] = {
-          uploadId,
-          parts: [],
-          uploadedBytes: 0,
-        };
       }
 
       // Get the ongoing multipart upload
@@ -149,6 +153,15 @@ export class S3FileService {
       // Upload the current chunk
       const partNumber = chunk.index + 1; // Part numbers start from 1
 
+      if (
+        chunk.index < chunk.total - 1 &&
+        buffer.byteLength < 5 * 1024 * 1024
+      ) {
+        throw new BadRequestException(
+          "S3 multipart non-final chunk must be at least 5MB",
+        );
+      }
+
       const uploadPartResponse: UploadPartCommandOutput = await s3Instance.send(
         new UploadPartCommand({
           Bucket: bucketName,
@@ -159,12 +172,23 @@ export class S3FileService {
         }),
       );
 
-      // Store the ETag and PartNumber for later completion
-      multipartUpload.parts.push({
-        ETag: uploadPartResponse.ETag,
-        PartNumber: partNumber,
-      });
-      multipartUpload.uploadedBytes += buffer.byteLength;
+      // Store the ETag and PartNumber, deduplicating on retry
+      const existingPartIndex = multipartUpload.parts.findIndex(
+        (p) => p.PartNumber === partNumber,
+      );
+      if (existingPartIndex >= 0) {
+        multipartUpload.parts[existingPartIndex] = {
+          ETag: uploadPartResponse.ETag,
+          PartNumber: partNumber,
+        };
+      } else {
+        multipartUpload.parts.push({
+          ETag: uploadPartResponse.ETag,
+          PartNumber: partNumber,
+        });
+        multipartUpload.uploadedBytes += buffer.byteLength;
+      }
+      multipartUpload.parts.sort((a, b) => a.PartNumber - b.PartNumber);
 
       // Complete the multipart upload if it's the last chunk
       if (chunk.index === chunk.total - 1) {
@@ -625,5 +649,32 @@ export class S3FileService {
     if (!configS3Path) return "";
     const normalized = `${configS3Path}`.replace(/^\/+|\/+$/g, "");
     return normalized ? `${normalized}/` : "";
+  }
+
+  hasPendingUploads(shareId: string): boolean {
+    return Object.values(this.multipartUploads).some(
+      (u) => u.shareId === shareId,
+    );
+  }
+
+  async abortShareMultipartUploads(shareId: string): Promise<void> {
+    const bucketName = this.config.get("s3.bucketName");
+    const s3Instance = this.getS3Instance();
+    for (const [fileId, upload] of Object.entries(this.multipartUploads)) {
+      if (upload.shareId === shareId) {
+        try {
+          await s3Instance.send(
+            new AbortMultipartUploadCommand({
+              Bucket: bucketName,
+              Key: `${this.getS3Path()}${shareId}/${fileId}`,
+              UploadId: upload.uploadId,
+            }),
+          );
+        } catch {
+          // Ignore
+        }
+        delete this.multipartUploads[fileId];
+      }
+    }
   }
 }

@@ -29,14 +29,238 @@ export function verifyAgentTokenFormat(rawToken: string): boolean {
 }
 
 export function sanitizeRelativePath(filePath: string): string {
-  const normalized = filePath.replace(/\\/g, "/").trim();
-  const segments = normalized
-    .split("/")
-    .filter((s) => s.length > 0 && s !== "." && s !== "..");
-  if (segments.length === 0) {
+  if (typeof filePath !== "string" || filePath.trim().length === 0) {
     throw new Error("Invalid path: file name cannot be empty");
   }
+  const normalized = filePath.replace(/\\/g, "/").trim();
+  if (normalized.includes("\0")) {
+    throw new Error("Invalid path: null bytes are not allowed");
+  }
+  if (normalized.startsWith("/") || /^[a-zA-Z]:/.test(normalized)) {
+    throw new Error("Invalid path: absolute paths are not allowed");
+  }
+  const segments = normalized.split("/");
+  for (const seg of segments) {
+    if (seg === ".." || seg === ".") {
+      throw new Error("Invalid path: directory traversal is not allowed");
+    }
+    if (seg.length === 0) {
+      throw new Error("Invalid path: empty path segment");
+    }
+  }
   return segments.join("/");
+}
+
+export function isStrictBase64(str: string): boolean {
+  if (typeof str !== "string") return false;
+  if (str.length === 0) return true;
+  if (str.length % 4 !== 0) return false;
+  const base64Regex =
+    /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$/;
+  if (!base64Regex.test(str)) return false;
+  try {
+    return Buffer.from(str, "base64").toString("base64") === str;
+  } catch {
+    return false;
+  }
+}
+
+export const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export const SHARE_ID_REGEX = /^[a-zA-Z0-9_-]{3,50}$/;
+
+export function extractBearerToken(authHeader?: string): string | null {
+  if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
+    return authHeader.slice(7).trim();
+  }
+  return null;
+}
+
+export function validateOriginHeader(
+  origin: string | undefined,
+  appUrl: string,
+): boolean {
+  if (!origin || typeof origin !== "string") {
+    return true; // Non-browser clients (CLI helper, Claude Desktop, curl)
+  }
+  try {
+    const requestOrigin = new URL(origin).origin;
+    if (appUrl) {
+      const configuredOrigin = new URL(appUrl).origin;
+      if (requestOrigin === configuredOrigin) return true;
+    }
+    const host = new URL(origin).hostname;
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+export function isInitializeRequest(body: unknown): boolean {
+  return (
+    (body !== null &&
+      typeof body === "object" &&
+      (body as Record<string, unknown>).method === "initialize") ||
+    (Array.isArray(body) &&
+      body.some(
+        (msg) =>
+          msg !== null &&
+          typeof msg === "object" &&
+          (msg as Record<string, unknown>).method === "initialize",
+      ))
+  );
+}
+
+export class SessionTracker<
+  T extends {
+    userId: string;
+    lastActive: number;
+    close: () => Promise<void> | void;
+  },
+> {
+  private sessions = new Map<string, T>();
+  readonly maxSessionsPerUser: number;
+  readonly maxTotalSessions: number;
+  readonly sessionIdleTimeoutMs: number;
+
+  constructor(
+    maxSessionsPerUser = 10,
+    maxTotalSessions = 100,
+    sessionIdleTimeoutMs = 30 * 60 * 1000,
+  ) {
+    this.maxSessionsPerUser = maxSessionsPerUser;
+    this.maxTotalSessions = maxTotalSessions;
+    this.sessionIdleTimeoutMs = sessionIdleTimeoutMs;
+  }
+
+  get(sessionId: string): T | undefined {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.lastActive = Date.now();
+    }
+    return session;
+  }
+
+  set(sessionId: string, session: T): void {
+    this.cleanupExpired();
+    this.evictForUser(session.userId);
+    this.sessions.set(sessionId, session);
+  }
+
+  delete(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      void Promise.resolve(session.close()).catch(() => {});
+      this.sessions.delete(sessionId);
+      return true;
+    }
+    return false;
+  }
+
+  cleanupExpired(): void {
+    const now = Date.now();
+    for (const [id, session] of this.sessions.entries()) {
+      if (now - session.lastActive > this.sessionIdleTimeoutMs) {
+        this.delete(id);
+      }
+    }
+  }
+
+  private evictForUser(userId: string): void {
+    const userSessions: Array<{ id: string; session: T }> = [];
+    for (const [id, session] of this.sessions.entries()) {
+      if (session.userId === userId) {
+        userSessions.push({ id, session });
+      }
+    }
+    if (userSessions.length >= this.maxSessionsPerUser) {
+      userSessions.sort((a, b) => a.session.lastActive - b.session.lastActive);
+      this.delete(userSessions[0].id);
+    }
+    if (this.sessions.size >= this.maxTotalSessions) {
+      const all = Array.from(this.sessions.entries()).sort(
+        (a, b) => a[1].lastActive - b[1].lastActive,
+      );
+      if (all[0]) {
+        this.delete(all[0][0]);
+      }
+    }
+  }
+
+  get size(): number {
+    return this.sessions.size;
+  }
+
+  entries(): IterableIterator<[string, T]> {
+    return this.sessions.entries();
+  }
+}
+
+export interface PendingFileInfo {
+  name: string;
+  totalChunks: number;
+  chunks: Set<number>;
+}
+
+export class PendingUploadsTracker {
+  private pending = new Map<string, Map<string, PendingFileInfo>>();
+
+  trackChunk(
+    shareId: string,
+    fileId: string,
+    name: string,
+    chunkIndex: number,
+    totalChunks: number,
+  ): { isComplete: boolean } {
+    let shareFiles = this.pending.get(shareId);
+    if (!shareFiles) {
+      shareFiles = new Map();
+      this.pending.set(shareId, shareFiles);
+    }
+    let fileInfo = shareFiles.get(fileId);
+    if (!fileInfo) {
+      fileInfo = { name, totalChunks, chunks: new Set() };
+      shareFiles.set(fileId, fileInfo);
+    }
+    fileInfo.chunks.add(chunkIndex);
+
+    const isComplete =
+      chunkIndex === totalChunks - 1 && fileInfo.chunks.size >= totalChunks;
+    if (isComplete) {
+      shareFiles.delete(fileId);
+      if (shareFiles.size === 0) {
+        this.pending.delete(shareId);
+      }
+    }
+    return { isComplete };
+  }
+
+  hasPendingFiles(shareId: string): {
+    hasPending: boolean;
+    fileName?: string;
+    received?: number;
+    total?: number;
+  } {
+    const shareFiles = this.pending.get(shareId);
+    if (!shareFiles || shareFiles.size === 0) {
+      return { hasPending: false };
+    }
+    const [_, info] = shareFiles.entries().next().value;
+    return {
+      hasPending: true,
+      fileName: info.name,
+      received: info.chunks.size,
+      total: info.totalChunks,
+    };
+  }
+
+  clearShare(shareId: string): void {
+    this.pending.delete(shareId);
+  }
 }
 
 export function normalizeExpirationInput(input?: any): string {
@@ -74,12 +298,26 @@ export function normalizeExpirationInput(input?: any): string {
 }
 
 export interface McpServerDependencies {
-  user: {
+  user?: {
     id: string;
     username?: string;
     allowShare?: boolean;
     shareSizeLimit?: string | null;
   };
+  getCurrentUser?: () =>
+    | Promise<{
+        id: string;
+        username?: string;
+        allowShare?: boolean;
+        shareSizeLimit?: string | null;
+      } | null>
+    | {
+        id: string;
+        username?: string;
+        allowShare?: boolean;
+        shareSizeLimit?: string | null;
+      }
+    | null;
   getAppUrl: () => string;
   getChunkSize: () => number;
   getShareIdLength: () => number;
@@ -122,6 +360,14 @@ export interface McpServerDependencies {
   cancelShare: (shareId: string) => Promise<void>;
 }
 
+async function resolveUser(deps: McpServerDependencies) {
+  if (deps.getCurrentUser) {
+    const user = await deps.getCurrentUser();
+    if (user) return user;
+  }
+  return deps.user;
+}
+
 export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
   const server = new McpServer({
     name: "pingvin-share",
@@ -162,7 +408,8 @@ export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
     },
     async (args) => {
       try {
-        if (deps.user.allowShare === false) {
+        const user = await resolveUser(deps);
+        if (!user || user.allowShare === false) {
           throw new Error("Sharing is disabled for this user");
         }
 
@@ -187,8 +434,8 @@ export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
         });
 
         const chunkSize = deps.getChunkSize();
-        const maxShareSize = deps.user.shareSizeLimit
-          ? parseInt(deps.user.shareSizeLimit, 10)
+        const maxShareSize = user.shareSizeLimit
+          ? parseInt(user.shareSizeLimit, 10)
           : deps.getMaxShareSize();
 
         const result = {
@@ -205,13 +452,14 @@ export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
-      } catch (error: any) {
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
         return {
           isError: true,
           content: [
             {
               type: "text",
-              text: `Error creating share: ${error.message || String(error)}`,
+              text: `Error creating share: ${msg}`,
             },
           ],
         };
@@ -256,7 +504,25 @@ export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
     },
     async (args) => {
       try {
+        if (!SHARE_ID_REGEX.test(args.shareId)) {
+          throw new Error(
+            `Invalid shareId: '${args.shareId}' must match /^[a-zA-Z0-9_-]{3,50}$/`,
+          );
+        }
+
         const safeName = sanitizeRelativePath(args.name);
+
+        if (!Number.isSafeInteger(args.chunkIndex) || args.chunkIndex < 0) {
+          throw new Error(
+            `chunkIndex (${args.chunkIndex}) must be a non-negative safe integer`,
+          );
+        }
+
+        if (!Number.isSafeInteger(args.totalChunks) || args.totalChunks < 1) {
+          throw new Error(
+            `totalChunks (${args.totalChunks}) must be a positive safe integer`,
+          );
+        }
 
         if (args.chunkIndex >= args.totalChunks) {
           throw new Error(
@@ -264,11 +530,23 @@ export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
           );
         }
 
+        if (args.fileId && !UUID_REGEX.test(args.fileId)) {
+          throw new Error(
+            `Invalid fileId: '${args.fileId}' must be a valid UUID`,
+          );
+        }
+
+        if (!isStrictBase64(args.dataBase64)) {
+          throw new Error(
+            "Invalid chunk payload: dataBase64 must be a strictly valid base64 string",
+          );
+        }
+
         const configuredChunkSize = deps.getChunkSize();
         const buffer = Buffer.from(args.dataBase64, "base64");
-        if (buffer.length > configuredChunkSize * 1.5) {
+        if (buffer.length > configuredChunkSize) {
           throw new Error(
-            `Chunk payload byte length (${buffer.length}) exceeds server chunk size limit`,
+            `Chunk payload byte length (${buffer.length}) exceeds server chunk size limit (${configuredChunkSize})`,
           );
         }
 
@@ -300,13 +578,14 @@ export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
-      } catch (error: any) {
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
         return {
           isError: true,
           content: [
             {
               type: "text",
-              text: `Error uploading chunk: ${error.message || String(error)}`,
+              text: `Error uploading chunk: ${msg}`,
             },
           ],
         };
@@ -323,6 +602,11 @@ export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
     },
     async (args) => {
       try {
+        if (!SHARE_ID_REGEX.test(args.shareId)) {
+          throw new Error(
+            `Invalid shareId: '${args.shareId}' must match /^[a-zA-Z0-9_-]{3,50}$/`,
+          );
+        }
         const completed = await deps.completeShare(args.shareId);
         const appUrl = deps.getAppUrl().replace(/\/$/, "");
         const publicUrl = appUrl
@@ -350,13 +634,14 @@ export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
-      } catch (error: any) {
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
         return {
           isError: true,
           content: [
             {
               type: "text",
-              text: `Error finalizing share: ${error.message || String(error)}`,
+              text: `Error finalizing share: ${msg}`,
             },
           ],
         };
@@ -373,6 +658,11 @@ export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
     },
     async (args) => {
       try {
+        if (!SHARE_ID_REGEX.test(args.shareId)) {
+          throw new Error(
+            `Invalid shareId: '${args.shareId}' must match /^[a-zA-Z0-9_-]{3,50}$/`,
+          );
+        }
         const share = await deps.getShareStatus(args.shareId);
         if (!share) {
           throw new Error(`Share '${args.shareId}' not found`);
@@ -397,13 +687,14 @@ export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
-      } catch (error: any) {
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
         return {
           isError: true,
           content: [
             {
               type: "text",
-              text: `Error getting share status: ${error.message || String(error)}`,
+              text: `Error getting share status: ${msg}`,
             },
           ],
         };
@@ -420,6 +711,11 @@ export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
     },
     async (args) => {
       try {
+        if (!SHARE_ID_REGEX.test(args.shareId)) {
+          throw new Error(
+            `Invalid shareId: '${args.shareId}' must match /^[a-zA-Z0-9_-]{3,50}$/`,
+          );
+        }
         await deps.cancelShare(args.shareId);
         return {
           content: [
@@ -436,13 +732,14 @@ export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
             },
           ],
         };
-      } catch (error: any) {
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
         return {
           isError: true,
           content: [
             {
               type: "text",
-              text: `Error canceling share: ${error.message || String(error)}`,
+              text: `Error canceling share: ${msg}`,
             },
           ],
         };

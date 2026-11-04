@@ -13,7 +13,7 @@ Agents can upload files or directories in bounded streaming chunks and receive a
 ### 1. Remote MCP Endpoint (`/api/mcp`)
 - **Transport**: Official MCP **Streamable HTTP** transport.
 - **Location**: `https://<your-pingvin-domain>/api/mcp`
-- **Authentication**: Dedicated per-user revocable agent tokens via `Authorization: Bearer psa_...` header.
+- **Authentication**: Dedicated per-user revocable agent tokens via `Authorization: Bearer psa_...` header. Query parameter token authentication is strictly disabled to prevent credential leakage in URLs, server logs, and proxies.
 - **Security**: Tokens are hashed (SHA-256) in the database, displayed only once upon creation, and strictly scoped to the owner's shares and quotas.
 - **Tools**:
   - `pingvin_create_share`: creates an uncompleted share with optional name, description, expiration, password, and download view limits.
@@ -27,6 +27,15 @@ When an AI agent runs on your local machine and needs to share local files:
 - Remote MCP endpoints cannot read your local filesystem paths.
 - Sending huge base64 files directly through LLM context is slow and consumes massive token budgets.
 - The **local companion helper** runs locally (via stdio or CLI) and exposes an `upload_files(paths)` tool. It streams file chunks from your local disk directly to the Pingvin server and returns the public link in a single tool call.
+- **Zero npm dependencies**: Uses Node.js >= 18 built-ins (`node:fs`, `node:crypto`, `node:readline`, global `fetch`). No `npm install` is required on a clean checkout.
+
+---
+
+## Host Compatibility & Bearer Authentication
+
+While the Model Context Protocol standard defines an OAuth 2.0 authorization framework for remote servers, several MCP client hosts (such as Claude Desktop) currently only support Stdio transports or remote HTTP servers without allowing arbitrary static HTTP bearer headers in their configuration.
+
+For clients with this static bearer limit, use **Option A (Local Companion)** below. The companion runs as a local Stdio MCP server, reads the local files directly, and sends authenticated bearer HTTP requests to your Pingvin Share server.
 
 ---
 
@@ -79,7 +88,7 @@ For MCP hosts supporting Streamable HTTP transports with bearer authentication:
 
 ## CLI Upload Helper
 
-You can also use the local helper directly from your terminal:
+You can also use the local helper directly from your terminal on any machine with Node.js >= 18:
 
 ```bash
 # Set credentials
@@ -105,7 +114,7 @@ Total bytes: 14205810
 
 ## Security & Storage
 
-- **Revocation**: Tokens can be revoked anytime in your Account settings. Revocation takes effect immediately.
-- **Quota & Limits**: Uploads via agent tokens inherit the user's storage quota, share size limits, and max shares limit.
-- **Path Traversal Protection**: All file paths and chunk names are strictly sanitized to prevent directory traversal attacks.
-- **Storage Providers**: Local, Google Drive, and S3 backend storage configurations are all supported automatically without requiring client-side provider logic.
+- **Revocation**: Tokens can be revoked anytime in your Account settings. Revocation takes effect immediately on subsequent requests.
+- **Quota & Limits**: Uploads via agent tokens strictly inherit the user's storage quota, share size limits, and max shares limit.
+- **Path Traversal Protection**: All file paths and chunk names are strictly validated; directory traversal (`..`) and absolute paths are rejected. The local helper ignores symlinks that escape the target directory.
+- **Storage Providers**: Chunked streaming is supported across Local filesystem, Google Drive, and S3 backend storage providers via server-side streaming.
