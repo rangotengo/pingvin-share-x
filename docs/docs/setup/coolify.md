@@ -44,10 +44,10 @@ OAuth redirect, once the host is public:
 
 Cloudflare terminates TLS. `cloudflared` sends HTTP to `127.0.0.1:80`. Traefik `force HTTPS` then redirects that HTTP request back to HTTPS, and the tunnel sends HTTP again. That is the `302`/`307` loop. Leave force HTTPS off, same as the other apps on this proxy. Do not change DNS.
 
-Service `txnjb01ucx5erhq80eebu5um`, application `gdp0vscmihxisg5pi4szziwj`. Live image `bjtdxp0v36eltg1ril84bghx:4bae96c620a22e6f36f5910aedb99b9e1eb22717`. Domain `https://share.arunshrestha.info.np`. Force HTTPS off. Duplicate app `bjtdxp0v36eltg1ril84bghx` is stopped, auto-deploy off, volumes kept.
+Service `txnjb01ucx5erhq80eebu5um`, application `gdp0vscmihxisg5pi4szziwj`. Live image `bjtdxp0v36eltg1ril84bghx:a9d2f75fe52f4bac865502d0908db0c748d79803`. Domain `https://share.arunshrestha.info.np`. Force HTTPS off. Duplicate app `bjtdxp0v36eltg1ril84bghx` is stopped, auto-deploy off, volumes kept.
 
 Administrator is the existing account, username `arun`, email `admin@arunshrestha.info.np`. Password was not reset. Registration is closed.
 
 ## Not verified here
 
-Google OAuth client id and secret are still missing. The private prompt was cancelled. No live Drive upload, range, ZIP, cleanup, or refresh has been run. A later docs commit does not change the running image until the service image tag is rebuilt and set again.
+Public config does not show whether the client id or secret is set. Do not clear those values. `googledrive.enabled` is false. Connect failures now redirect with an allowlisted `reason` and log that code only. No live Drive upload, range, ZIP, or refresh has been run. A later docs commit does not change the running image until the service image tag is rebuilt and set again.
