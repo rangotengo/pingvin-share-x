@@ -17,6 +17,7 @@ import { I18nService } from "nestjs-i18n";
 import { ClamScanService } from "src/clamscan/clamscan.service";
 import { ConfigService } from "src/config/config.service";
 import { EmailService } from "src/email/email.service";
+import { isRecordMissing } from "src/file/delete-plan";
 import { FileService } from "src/file/file.service";
 import { PrismaService } from "src/prisma/prisma.service";
 import { ReverseShareService } from "src/reverseShare/reverseShare.service";
@@ -496,13 +497,17 @@ export class ShareService {
       where: { id: shareId },
     });
 
-    if (!share) throw new NotFoundException(this.i18n.t("share.notFound"));
+    if (!share) return;
 
     if (!share.creatorId && !isDeleterAdmin)
       throw new ForbiddenException(this.i18n.t("share.anonymousNoDelete"));
 
     await this.fileService.deleteAllFiles(shareId);
-    await this.prisma.share.delete({ where: { id: shareId } });
+    await this.prisma.share
+      .delete({ where: { id: shareId } })
+      .catch((error) => {
+        if (!isRecordMissing(error)) throw error;
+      });
   }
 
   async expire(shareId: string) {

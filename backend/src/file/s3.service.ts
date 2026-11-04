@@ -27,6 +27,11 @@ import * as crypto from "crypto";
 import * as mime from "mime-types";
 import { byteToHumanSizeString } from "src/utils/fileSize.util";
 import { getUserActiveStorageUsage } from "src/utils/storageQuota.util";
+import {
+  isMissingObject,
+  isMissingObjectCode,
+  isRecordMissing,
+} from "./delete-plan";
 import { File } from "./file.service";
 import { Readable } from "stream";
 import { validate as isValidUUID } from "uuid";
@@ -264,9 +269,7 @@ export class S3FileService {
     const fileMetaData = await this.prisma.file.findFirst({
       where: { id: fileId, shareId },
     });
-
-    if (!fileMetaData)
-      throw new NotFoundException(this.i18n.t("file.notFound"));
+    if (!fileMetaData) return;
 
     const key = `${this.getS3Path()}${shareId}/${fileMetaData.name}`;
     const s3Instance = this.getS3Instance();
@@ -278,11 +281,15 @@ export class S3FileService {
           Key: key,
         }),
       );
-    } catch {
-      throw new Error(this.i18n.t("file.s3DeleteError"));
+    } catch (error) {
+      if (!isMissingObject(error)) {
+        throw new Error(this.i18n.t("file.s3DeleteError"));
+      }
     }
 
-    await this.prisma.file.delete({ where: { id: fileId } });
+    await this.prisma.file.delete({ where: { id: fileId } }).catch((error) => {
+      if (!isRecordMissing(error)) throw error;
+    });
   }
 
   async deleteAllFiles(shareId: string) {
@@ -306,8 +313,10 @@ export class S3FileService {
               Key: key,
             }),
           );
-        } catch {
-          // ignore per-object failure
+        } catch (error) {
+          if (!isMissingObject(error)) {
+            throw new Error(this.i18n.t("file.s3DeleteError"));
+          }
         }
       }
     };
@@ -331,7 +340,7 @@ export class S3FileService {
       }));
 
       // Delete all files in a single request (up to 1000 objects at once)
-      await s3Instance.send(
+      const deleted = await s3Instance.send(
         new DeleteObjectsCommand({
           Bucket: bucketName,
           Delete: {
@@ -339,10 +348,21 @@ export class S3FileService {
           },
         }),
       );
+      const failed = (deleted.Errors || []).filter(
+        (item) => !isMissingObjectCode(item.Code),
+      );
+      if (failed.length > 0) {
+        throw new Error(this.i18n.t("file.s3DeleteError"));
+      }
     } catch (error) {
-      // try deleting by known file names from DB instead.
+      if (isMissingObject(error)) return;
+      if (
+        error instanceof Error &&
+        error.message === this.i18n.t("file.s3DeleteError")
+      ) {
+        throw error;
+      }
       await fallbackDeleteByDb("list_or_bulk_delete_failed");
-      void error;
     }
   }
 

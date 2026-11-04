@@ -12,6 +12,7 @@ import useTranslate from "../../hooks/useTranslate.hook";
 import useUser from "../../hooks/user.hook";
 import shareService from "../../services/share.service";
 import { FileListItem, FileMetaData, FileUpload } from "../../types/File.type";
+import { editFinishAction } from "../../utils/shareEdit.util";
 import toast from "../../utils/toast.util";
 import {
   getNormalizedFileName,
@@ -37,6 +38,7 @@ const EditableUpload = ({
   const { user } = useUser();
 
   const chunkSize = useRef(parseInt(config.get("share.chunkSize")));
+  const saving = useRef(false);
 
   const [existingFiles, setExistingFiles] =
     useState<Array<FileMetaData & { deleted?: boolean }>>(savedFiles);
@@ -170,6 +172,8 @@ const EditableUpload = ({
   };
 
   const save = async () => {
+    if (saving.current) return;
+    saving.current = true;
     setIsUploading(true);
 
     try {
@@ -184,6 +188,27 @@ const EditableUpload = ({
         await removeFiles();
       }
 
+      const keptFiles = existingFiles.filter((file) => !file.deleted).length;
+      if (
+        !hasFailed &&
+        editFinishAction(keptFiles, uploadingFiles.length) === "delete-share"
+      ) {
+        try {
+          await shareService.remove(shareId);
+        } catch (error) {
+          if (
+            !(error instanceof AxiosError) ||
+            error.response?.status !== 404
+          ) {
+            toast.axiosError(error);
+            return;
+          }
+        }
+        toast.success(t("share.edit.notify.save-success"));
+        router.back();
+        return;
+      }
+
       await completeShare();
 
       if (!hasFailed) {
@@ -193,6 +218,7 @@ const EditableUpload = ({
     } catch {
       toast.error(t("share.edit.notify.generic-error"));
     } finally {
+      saving.current = false;
       setIsUploading(false);
     }
   };

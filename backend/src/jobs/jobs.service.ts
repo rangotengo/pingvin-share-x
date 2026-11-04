@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { Cron } from "@nestjs/schedule";
 import * as fs from "fs";
 import * as moment from "moment";
+import { isRecordMissing } from "src/file/delete-plan";
 import { FileService } from "src/file/file.service";
 import { PrismaService } from "src/prisma/prisma.service";
 import { ReverseShareService } from "src/reverseShare/reverseShare.service";
@@ -44,15 +45,13 @@ export class JobsService {
       },
     });
 
+    let deleted = 0;
     for (const expiredShare of expiredShares) {
-      await this.fileService.deleteAllFiles(expiredShare.id);
-      await this.prisma.share.delete({
-        where: { id: expiredShare.id },
-      });
+      if (await this.deleteStoredShare(expiredShare.id)) deleted++;
     }
 
-    if (expiredShares.length > 0) {
-      this.logger.log(`Deleted ${expiredShares.length} expired shares`);
+    if (deleted > 0) {
+      this.logger.log(`Deleted ${deleted} expired shares`);
     }
   }
 
@@ -88,15 +87,30 @@ export class JobsService {
       },
     });
 
+    let deleted = 0;
     for (const unfinishedShare of unfinishedShares) {
-      await this.fileService.deleteAllFiles(unfinishedShare.id);
-      await this.prisma.share.delete({
-        where: { id: unfinishedShare.id },
-      });
+      if (await this.deleteStoredShare(unfinishedShare.id)) deleted++;
     }
 
-    if (unfinishedShares.length > 0) {
-      this.logger.log(`Deleted ${unfinishedShares.length} unfinished shares`);
+    if (deleted > 0) {
+      this.logger.log(`Deleted ${deleted} unfinished shares`);
+    }
+  }
+
+  private async deleteStoredShare(shareId: string) {
+    try {
+      await this.fileService.deleteAllFiles(shareId);
+      await this.prisma.share
+        .delete({ where: { id: shareId } })
+        .catch((error) => {
+          if (!isRecordMissing(error)) throw error;
+        });
+      return true;
+    } catch (error) {
+      this.logger.error(
+        `Share delete failed for ${shareId}: ${error instanceof Error ? error.message : "unknown"}`,
+      );
+      return false;
     }
   }
 

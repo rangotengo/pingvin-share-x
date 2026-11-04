@@ -19,6 +19,7 @@ import { byteToHumanSizeString } from "src/utils/fileSize.util";
 import { getUserActiveStorageUsage } from "src/utils/storageQuota.util";
 import { validate as isValidUUID } from "uuid";
 import { DriveError, GoogleDriveClient } from "./google-drive.client";
+import { isRecordMissing } from "./delete-plan";
 import {
   assertDriveFileId,
   chunkBytes,
@@ -182,16 +183,24 @@ export class GoogleDriveFileService {
     });
     if (fileMetaData?.providerFileId) {
       await this.getClient().deleteFile(fileMetaData.providerFileId);
-      await this.prisma.file.delete({ where: { id: fileId } });
-      return;
+    }
+    if (fileMetaData) {
+      await this.prisma.file
+        .delete({ where: { id: fileId } })
+        .catch((error) => {
+          if (!isRecordMissing(error)) throw error;
+        });
     }
     const upload = await this.prisma.driveUpload.findUnique({
       where: { id: fileId },
     });
-    if (!upload || upload.shareId !== shareId) {
-      throw new NotFoundException(this.i18n.t("file.notFound"));
-    }
-    await this.prisma.driveUpload.delete({ where: { id: fileId } });
+    if (!upload || upload.shareId !== shareId) return;
+    await this.cancelUploads([upload]);
+    await this.prisma.driveUpload
+      .delete({ where: { id: fileId } })
+      .catch((error) => {
+        if (!isRecordMissing(error)) throw error;
+      });
   }
 
   async deleteAllFiles(shareId: string) {
@@ -200,16 +209,10 @@ export class GoogleDriveFileService {
       select: { providerFileId: true },
     });
     const ids = deletionTargets(files);
-    const client = this.connected() ? this.getClient() : null;
-    for (const id of ids) {
-      if (!client) break;
-      try {
-        await client.deleteFile(id);
-      } catch (error) {
-        this.logger.warn(
-          `Drive delete failed for ${id}: ${this.safeError(error)}`,
-        );
-      }
+    if (ids.length > 0) {
+      if (!this.connected()) throw new DriveError("not_connected");
+      const client = this.getClient();
+      for (const id of ids) await client.deleteFile(id);
     }
     const uploads = await this.prisma.driveUpload.findMany({
       where: { shareId },

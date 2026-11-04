@@ -7,6 +7,7 @@ import {
   redactSecrets,
   safeGoogleDetail,
 } from "./google-drive.protocol";
+import { isAlreadyGoneStatus } from "./delete-plan";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -337,8 +338,7 @@ export class GoogleDriveClient {
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(30_000),
     });
-    if (response.status === 404 || response.status === 204 || response.ok)
-      return;
+    if (isAlreadyGoneStatus(response.status)) return;
     throw new DriveError("delete failed", response.status);
   }
 
