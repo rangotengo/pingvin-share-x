@@ -93,8 +93,14 @@ const isShareIdAvailable = async (id: string): Promise<boolean> => {
   return (await api.get(`/shares/isShareIdAvailable/${id}`)).data.isAvailable;
 };
 
+const getFileMimeType = (fileName: string): string => {
+  // ponytail: strip path segments before MIME detection; upgrade if MIME parameters needed
+  const baseName = fileName.split(/[/\\]/).pop() || fileName;
+  return (mime.contentType(baseName) || "").split(";")[0];
+};
+
 const doesFileSupportPreview = (fileName: string) => {
-  const mimeType = (mime.contentType(fileName) || "").split(";")[0];
+  const mimeType = getFileMimeType(fileName);
 
   if (!mimeType) return false;
 
@@ -110,7 +116,7 @@ const doesFileSupportPreview = (fileName: string) => {
 };
 
 const isShareTextFile = (fileName: string) => {
-  const mimeType = (mime.contentType(fileName) || "").split(";")[0];
+  const mimeType = getFileMimeType(fileName);
 
   if (!mimeType) return false;
 
@@ -421,6 +427,7 @@ export default {
   remove,
   expire,
   getMetaData,
+  getFileMimeType,
   doesFileSupportPreview,
   isShareTextFile,
   getMyShares,

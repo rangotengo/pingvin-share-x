@@ -109,33 +109,10 @@ export class ShareSecurityGuard extends JwtGuard {
       throw new NotFoundException(this.i18n.t("share.notFound"));
     }
 
-    // If user sharing is enabled, check if the authenticated user is a recipient
-    if (await this.isRecipient(share, user)) {
+    const isCreator = Boolean(user && share.creatorId === user.id);
+    if (isCreator) {
       return true;
     }
-
-    // If share is restricted to named recipients, block everyone else (excluding the creator)
-    if (
-      share.security?.restrictToRecipients &&
-      (!user || share.creatorId !== user.id)
-    ) {
-      throw new ForbiddenException(
-        this.i18n.t("share.restrictedToRecipients"),
-        "share_restricted_to_recipients",
-      );
-    }
-
-    if (share.security?.password && !shareToken)
-      throw new ForbiddenException(
-        this.i18n.t("file.passwordProtected"),
-        "share_password_required",
-      );
-
-    if (!(await this.shareService.verifyShareToken(share, shareToken)))
-      throw new ForbiddenException(
-        this.i18n.t("share.tokenRequired"),
-        "share_token_required",
-      );
 
     // Only the creator and reverse share creator can access the reverse share if it's not public
     if (
@@ -148,6 +125,70 @@ export class ShareSecurityGuard extends JwtGuard {
         this.i18n.t("share.privateShare"),
         "private_share",
       );
+
+    const isRecipientUser = await this.isRecipient(share, user);
+
+    // If share is restricted to named recipients, block everyone else
+    if (share.security?.restrictToRecipients && !isRecipientUser) {
+      throw new ForbiddenException(
+        this.i18n.t("share.restrictedToRecipients"),
+        "share_restricted_to_recipients",
+      );
+    }
+
+    const hasValidToken =
+      Boolean(shareToken) &&
+      (await this.shareService.verifyShareToken(share, shareToken));
+
+    if (share.security?.password && !hasValidToken) {
+      if (!shareToken) {
+        throw new ForbiddenException(
+          this.i18n.t("file.passwordProtected"),
+          "share_password_required",
+        );
+      }
+      throw new ForbiddenException(
+        this.i18n.t("share.tokenRequired"),
+        "share_token_required",
+      );
+    }
+
+    if (isRecipientUser) {
+      if (!hasValidToken) {
+        const path = request.baseUrl
+          ? `${request.baseUrl}${request.path}`
+          : request.path;
+        const isShareView =
+          request.method === "GET" &&
+          (path.endsWith(`/shares/${shareId}`) ||
+            path.endsWith(`/${shareId}`) ||
+            request.route?.path === "/:id" ||
+            request.route?.path === "/shares/:id");
+
+        if (isShareView) {
+          await this.shareService.handleViewCount(
+            share.id,
+            share.security?.maxViews,
+          );
+          const response = context.switchToHttp().getResponse();
+          if (response && typeof response.cookie === "function") {
+            const token = await this.shareService.generateShareToken(share);
+            response.cookie(`share_${share.id}_token`, token, {
+              path: "/",
+              httpOnly: true,
+            });
+          }
+        }
+      }
+      return true;
+    }
+
+    if (!hasValidToken) {
+      throw new ForbiddenException(
+        this.i18n.t("share.tokenRequired"),
+        "share_token_required",
+      );
+    }
 
     return true;
   }

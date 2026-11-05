@@ -224,14 +224,14 @@ export class FileService {
   ) {
     try {
       if (
-        !recipientId ||
         !this.configService.get("smtp.enabled") ||
-        !this.configService.get("share.enableShareEmailRecipients") ||
         !this.configService.get("share.enableShareDownloadNotifications")
       )
         return;
 
-      const notificationKey = `share-download-notification:${shareId}:${recipientId}`;
+      const notificationKey = recipientId
+        ? `share-download-notification:${shareId}:${recipientId}`
+        : `share-download-notification:${shareId}:anonymous`;
       if (await this.cache.get<true>(notificationKey)) return;
 
       const share = await this.prisma.share.findUnique({
@@ -241,20 +241,29 @@ export class FileService {
           creator: {
             select: { email: true, username: true, displayName: true },
           },
-          recipients: {
-            where: { id: recipientId },
-            select: { email: true },
-          },
+          recipients: recipientId
+            ? {
+                where: { id: recipientId },
+                select: { email: true },
+              }
+            : false,
         },
       });
 
-      const recipient = share?.recipients[0];
-      if (!share?.creator?.email || !recipient) return;
+      if (!share?.creator?.email) return;
 
-      const recipientUser = await this.prisma.user.findUnique({
-        where: { email: recipient.email },
-        select: { displayName: true, username: true },
-      });
+      let recipientEmail: string | undefined;
+      let recipientName: string | undefined;
+
+      if (recipientId && share.recipients?.[0]?.email) {
+        recipientEmail = share.recipients[0].email;
+        const recipientUser = await this.prisma.user.findUnique({
+          where: { email: recipientEmail },
+          select: { displayName: true, username: true },
+        });
+        recipientName =
+          recipientUser?.displayName || recipientUser?.username;
+      }
 
       await this.cache.set(
         notificationKey,
@@ -266,9 +275,9 @@ export class FileService {
         share.creator.email,
         share.id,
         fileName,
-        recipient.email,
+        recipientEmail,
         share.creator?.displayName || share.creator?.username,
-        recipientUser?.displayName || recipientUser?.username,
+        recipientName,
       );
     } catch (e) {
       this.logger.error(

@@ -1,5 +1,5 @@
 import { ModalsContextProps } from "@mantine/modals/lib/context";
-import mime from "mime-types";
+import shareService from "../../../services/share.service";
 import { FileListItem, FileUpload } from "../../../types/File.type";
 import TextEditor from "../TextEditor";
 
@@ -11,7 +11,7 @@ const showTextEditorModal = <T extends FileListItem>(
   modals: ModalsContextProps,
 ) => {
   const originalFile = files[index] as unknown as File;
-  const mimeType = (mime.contentType(originalFile.name) || "").split(";")[0];
+  const mimeType = shareService.getFileMimeType(originalFile.name);
 
   modals.openModal({
     title: `Editing ${originalFile.name}`,

@@ -32,6 +32,8 @@ import configService from "../../../services/config.service";
 import { AdminConfig, UpdateConfig } from "../../../types/config.type";
 import { camelToKebab } from "../../../utils/string.util";
 import toast from "../../../utils/toast.util";
+import { stringToTimespan } from "../../../utils/date.util";
+import moment from "moment";
 
 const categories = [
   "General",
@@ -100,6 +102,47 @@ export default function AppShellDemo() {
     }
 
     if (updatedConfigVariables.length > 0) {
+      const defUpdated = updatedConfigVariables.find(
+        (u) => u.key === "share.defaultExpiration",
+      );
+      const maxUpdated = updatedConfigVariables.find(
+        (u) => u.key === "share.maxExpiration",
+      );
+      const currentDef = configVariables?.find(
+        (c) => c.key === "share.defaultExpiration",
+      );
+      const currentMax = configVariables?.find(
+        (c) => c.key === "share.maxExpiration",
+      );
+      const candidateDefStr =
+        defUpdated?.value ?? currentDef?.value ?? currentDef?.defaultValue;
+      const candidateMaxStr =
+        maxUpdated?.value ?? currentMax?.value ?? currentMax?.defaultValue;
+
+      if (candidateDefStr && candidateMaxStr) {
+        try {
+          const defTs = stringToTimespan(String(candidateDefStr));
+          const maxTs = stringToTimespan(String(candidateMaxStr));
+          if (maxTs.value > 0) {
+            const momentFn = (moment as any).default || moment;
+            const defMs = momentFn
+              .duration(defTs.value, defTs.unit)
+              .asMilliseconds();
+            const maxMs = momentFn
+              .duration(maxTs.value, maxTs.unit)
+              .asMilliseconds();
+            if (defTs.value === 0 || defMs > maxMs) {
+              toast.error(
+                t("admin.config.share.default-expiration.error.exceeds-max"),
+              );
+              return;
+            }
+          }
+        } catch {
+          // ignore parsing error here and let backend validate
+        }
+      }
+
       await configService
         .updateMany(updatedConfigVariables)
         .then(() => {

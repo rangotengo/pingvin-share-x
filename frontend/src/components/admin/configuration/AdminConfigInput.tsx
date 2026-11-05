@@ -20,6 +20,7 @@ import FileSizeInput from "../../core/FileSizeInput";
 import TimespanInput from "../../core/TimespanInput";
 import { LOCALES } from "../../../i18n/locales";
 import useTranslate from "../../../hooks/useTranslate.hook";
+import moment from "moment";
 
 const AdminConfigInput = ({
   configVariable,
@@ -80,6 +81,34 @@ const AdminConfigInput = ({
 
   const shouldShowPrimaryColorOverride =
     getEffectiveConfigValue("appearance.themePrimaryColor") === "custom";
+
+  let timespanError: string | undefined;
+  if (configVariable.key === "share.defaultExpiration") {
+    const defStr = getEffectiveConfigValue("share.defaultExpiration");
+    const maxStr = getEffectiveConfigValue("share.maxExpiration");
+    if (defStr && maxStr) {
+      try {
+        const defTs = stringToTimespan(defStr);
+        const maxTs = stringToTimespan(maxStr);
+        if (maxTs.value > 0) {
+          const momentFn = (moment as any).default || moment;
+          const defMs = momentFn
+            .duration(defTs.value, defTs.unit)
+            .asMilliseconds();
+          const maxMs = momentFn
+            .duration(maxTs.value, maxTs.unit)
+            .asMilliseconds();
+          if (defTs.value === 0 || defMs > maxMs) {
+            timespanError = t(
+              "admin.config.share.default-expiration.error.exceeds-max",
+            );
+          }
+        }
+      } catch {
+        // ignore invalid timespan while typing
+      }
+    }
+  }
 
   const form = useForm({
     initialValues: {
@@ -362,6 +391,7 @@ const AdminConfigInput = ({
           value={stringToTimespan(configVariable.value)}
           disabled={!configVariable.allowEdit}
           min={configVariable.key === "share.fileRetentionPeriod" ? -1 : 0}
+          error={timespanError}
           onChange={(timespan) =>
             onValueChange(configVariable, timespanToString(timespan))
           }
