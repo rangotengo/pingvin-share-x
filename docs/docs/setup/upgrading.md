@@ -4,9 +4,9 @@ id: upgrading
 
 # Upgrading
 
-### Google Drive storage
+### Google Drive and MCP server
 
-Fork builds that add Google Drive keep existing local and S3 shares. The container runs `prisma migrate deploy` on start, which adds `File.providerFileId` and the `DriveUpload` table. Do not enable Google Drive and S3 together. See [Google Drive](./google-drive.md).
+Merged builds on `main` include Google Drive storage and the authenticated Streamable HTTP MCP server with per-user agent tokens. On start, `prisma migrate deploy` adds `File.providerFileId`, `DriveUpload`, and `AgentToken`. Existing local and S3 shares remain unaffected. Do not enable Google Drive and S3 together. See [Google Drive](./google-drive.md) and [Model Context Protocol](./mcp.md).
 
 ### Upgrade to a new version
 

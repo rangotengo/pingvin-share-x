@@ -8,7 +8,7 @@ Use the existing Coolify service. Do not add a second app for the same share hos
 
 ## Image
 
-Upstream `ghcr.io/smp46/pingvin-share-x:v2.1.0` has no Drive provider. A Coolify Dockerfile build of this branch tags the image `{applicationUuid}:{commitSha}` on the Coolify host. Point the service image at that tag. Docker Compose uses a local tag when it is already present. Do not `pull` it.
+Upstream `ghcr.io/smp46/pingvin-share-x:v2.1.0` has no Drive or MCP support. A Coolify Dockerfile source build of `main` tags the image `{applicationUuid}:{commitSha}` on the Coolify host. Point the service image at that tag. Docker Compose uses a local tag when it is already present. Do not `pull` it.
 
 `ghcr.io/rangotengo/pingvin-share-x:drive` exists, but an anonymous pull returns 401 and the saved Coolify token cannot read packages. Do not depend on that tag until the token has `read:packages`.
 
