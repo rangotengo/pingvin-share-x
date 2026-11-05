@@ -19,6 +19,6 @@ import { S3FileService } from "./s3.service";
   ],
   controllers: [FileController, GoogleDriveAdminController],
   providers: [FileService, LocalFileService, S3FileService, GoogleDriveFileService],
-  exports: [FileService],
+  exports: [FileService, GoogleDriveFileService, S3FileService],
 })
 export class FileModule {}
