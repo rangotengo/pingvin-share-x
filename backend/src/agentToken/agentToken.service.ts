@@ -132,10 +132,6 @@ export class AgentTokenService {
       return { valid: false as const, error: "User account deactivated" };
     }
 
-    if (agentToken.user.allowShare === false) {
-      return { valid: false as const, error: "Sharing disabled for this user" };
-    }
-
     // Update lastUsedAt without awaiting
     void this.prisma.agentToken
       .update({

@@ -25,11 +25,31 @@ import { File } from "./file.service";
 
 @Injectable()
 export class LocalFileService {
+  private readonly locks = new Map<string, Promise<unknown>>();
+
   constructor(
     private prisma: PrismaService,
     private config: ConfigService,
     private readonly i18n: I18nService,
   ) {}
+
+  private async withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(key) || Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.locks.set(key, next);
+    try {
+      await prev;
+      return await fn();
+    } finally {
+      release();
+      if (this.locks.get(key) === next) {
+        this.locks.delete(key);
+      }
+    }
+  }
 
   async create(
     data: string,
@@ -43,6 +63,17 @@ export class LocalFileService {
       throw new BadRequestException(this.i18n.t("file.invalidIdFormat"));
     }
 
+    return this.withLock(file.id, () =>
+      this.createLocked(data, chunk, file as { id: string; name: string }, shareId),
+    );
+  }
+
+  private async createLocked(
+    data: string,
+    chunk: { index: number; total: number },
+    file: { id: string; name: string },
+    shareId: string,
+  ) {
     const share = await this.prisma.share.findUnique({
       where: { id: shareId },
       include: {
@@ -52,30 +83,68 @@ export class LocalFileService {
       },
     });
 
+    if (!share) {
+      throw new NotFoundException(this.i18n.t("share.notFound"));
+    }
+
     if (share.uploadLocked)
       throw new BadRequestException(this.i18n.t("file.alreadyCompleted"));
 
+    const tmpPath = `${SHARE_DIRECTORY}/${shareId}/${file.id}.tmp-chunk`;
     let diskFileSize: number;
     try {
-      diskFileSize = (
-        await fs.stat(`${SHARE_DIRECTORY}/${shareId}/${file.id}.tmp-chunk`)
-      ).size;
+      diskFileSize = (await fs.stat(tmpPath)).size;
     } catch {
       diskFileSize = 0;
     }
 
-    // If the sent chunk index and the expected chunk index doesn't match throw an error
     const chunkSize = this.config.get("share.chunkSize");
-    const expectedChunkIndex = Math.ceil(diskFileSize / chunkSize);
+    // Handle mid-chunk crash recovery: align back to chunk boundary if interrupted
+    if (chunk.index < chunk.total - 1 && diskFileSize % chunkSize !== 0) {
+      const alignedSize = Math.floor(diskFileSize / chunkSize) * chunkSize;
+      try {
+        await fs.truncate(tmpPath, alignedSize);
+        diskFileSize = alignedSize;
+      } catch {
+        // file might not exist or already cleaned
+      }
+    }
 
-    if (expectedChunkIndex != chunk.index)
+    const expectedChunkIndex = Math.floor(diskFileSize / chunkSize);
+    const buffer = Buffer.from(data, "base64");
+
+    // Handle replay under lost ACK: duplicate chunk already committed
+    if (chunk.index < expectedChunkIndex) {
+      // Validate that the existing file bytes at this chunk offset match to reject file change mid-upload
+      try {
+        const fd = await fs.open(tmpPath, "r");
+        try {
+          const checkBuffer = Buffer.alloc(buffer.byteLength);
+          const readResult = await fd.read(checkBuffer, 0, buffer.byteLength, chunk.index * chunkSize);
+          if (
+            readResult.bytesRead === buffer.byteLength &&
+            !checkBuffer.equals(buffer)
+          ) {
+            throw new BadRequestException(
+              "File content changed mid-upload; resume collision rejected.",
+            );
+          }
+        } finally {
+          await fd.close();
+        }
+      } catch (err) {
+        if (err instanceof BadRequestException) throw err;
+      }
+      return file;
+    }
+
+    if (expectedChunkIndex !== chunk.index) {
       throw new BadRequestException({
         message: this.i18n.t("file.unexpectedChunk"),
         error: "unexpected_chunk_index",
         expectedChunkIndex,
       });
-
-    const buffer = Buffer.from(data, "base64");
+    }
 
     // Check if there is enough space on the server
     const space = await fs.statfs(SHARE_DIRECTORY);
@@ -140,15 +209,13 @@ export class LocalFileService {
       }
     }
 
-    await fs.appendFile(
-      `${SHARE_DIRECTORY}/${shareId}/${file.id}.tmp-chunk`,
-      buffer,
-    );
+    await fs.mkdir(`${SHARE_DIRECTORY}/${shareId}`, { recursive: true });
+    await fs.appendFile(tmpPath, buffer);
 
     const isLastChunk = chunk.index == chunk.total - 1;
     if (isLastChunk) {
       await fs.rename(
-        `${SHARE_DIRECTORY}/${shareId}/${file.id}.tmp-chunk`,
+        tmpPath,
         `${SHARE_DIRECTORY}/${shareId}/${file.id}`,
       );
       const fileSize = (
@@ -160,6 +227,27 @@ export class LocalFileService {
           name: file.name,
           size: fileSize.toString(),
           share: { connect: { id: shareId } },
+        },
+      });
+      await this.prisma.uploadSession.deleteMany({
+        where: { id: file.id },
+      });
+    } else {
+      await this.prisma.uploadSession.upsert({
+        where: { id: file.id },
+        create: {
+          id: file.id,
+          shareId,
+          name: file.name,
+          storageProvider: "LOCAL",
+          totalChunks: chunk.total,
+          expectedChunkIndex: chunk.index + 1,
+          committedBytes: diskFileSize + buffer.byteLength,
+        },
+        update: {
+          expectedChunkIndex: chunk.index + 1,
+          committedBytes: diskFileSize + buffer.byteLength,
+          totalChunks: chunk.total,
         },
       });
     }
@@ -228,8 +316,28 @@ export class LocalFileService {
     try {
       await fs.unlink(filePath);
     } catch (error) {
-      if (!isEnoent(error)) throw error;
+      if (!isEnoent(error)) {
+        await this.prisma.cleanupFailure.create({
+          data: {
+            provider: "LOCAL",
+            shareId,
+            fileId,
+            targetId: filePath,
+            action: "delete_file",
+            error: (error as Error).message || String(error),
+          },
+        }).catch(() => {});
+        throw error;
+      }
     }
+    // Also clean up any pending tmp-chunk
+    try {
+      await fs.unlink(`${SHARE_DIRECTORY}/${shareId}/${fileId}.tmp-chunk`);
+    } catch {
+      // ignore
+    }
+    await this.prisma.uploadSession.deleteMany({ where: { id: fileId } }).catch(() => {});
+
     if (!fileMetaData) return;
     await this.prisma.file.delete({ where: { id: fileId } }).catch((error) => {
       if (!isRecordMissing(error)) throw error;
@@ -248,10 +356,24 @@ export class LocalFileService {
   }
 
   async deleteAllFiles(shareId: string) {
-    await fs.rm(`${SHARE_DIRECTORY}/${shareId}`, {
-      recursive: true,
-      force: true,
-    });
+    const dir = `${SHARE_DIRECTORY}/${shareId}`;
+    try {
+      await fs.rm(dir, {
+        recursive: true,
+        force: true,
+      });
+    } catch (error) {
+      await this.prisma.cleanupFailure.create({
+        data: {
+          provider: "LOCAL",
+          shareId,
+          targetId: dir,
+          action: "delete_folder",
+          error: (error as Error).message || String(error),
+        },
+      }).catch(() => {});
+    }
+    await this.prisma.uploadSession.deleteMany({ where: { shareId } }).catch(() => {});
   }
 
   async getZip(shareId: string): Promise<Readable> {

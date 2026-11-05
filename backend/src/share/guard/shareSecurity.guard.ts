@@ -88,6 +88,10 @@ export class ShareSecurityGuard extends JwtGuard {
 
     if (!share) throw new NotFoundException(this.i18n.t("share.notFound"));
 
+    if (share.removedReason) {
+      throw new NotFoundException(share.removedReason, "share_removed");
+    }
+
     const user = await this.authenticateUser(context);
 
     // If admin access is enabled and user is admin, allow access

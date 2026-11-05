@@ -93,6 +93,13 @@ export class FileController {
     );
   }
 
+  @Get("upload-status")
+  @SkipThrottle()
+  @UseGuards(IdValidation, CreateShareGuard, StrictShareOwnerGuard)
+  async getUploadStatus(@Param("shareId") shareId: string) {
+    return await this.fileService.getUploadStatus(shareId);
+  }
+
   @Post()
   @SkipThrottle()
   @UseGuards(IdValidation, CreateShareGuard, StrictShareOwnerGuard)

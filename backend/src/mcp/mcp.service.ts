@@ -365,6 +365,205 @@ export class McpService {
           await this.shareService.remove(shareId, false);
         }
       },
+      listShares: async (params) => {
+        const freshUser = await this.prisma.user.findUnique({
+          where: { id: user.id },
+        });
+        if (!freshUser) throw new ForbiddenException("User not found");
+
+        const limit = Math.min(Math.max(params.limit || 20, 1), 100);
+        const where: any = {
+          creatorId: freshUser.id,
+        };
+
+        if (!params.includeExpired) {
+          where.removedReason = null;
+          where.OR = [
+            { expiration: { gt: new Date() } },
+            { expiration: { equals: new Date(0) } },
+          ];
+        }
+
+        if (params.query && params.query.trim()) {
+          const q = params.query.trim();
+          where.AND = [
+            {
+              OR: [
+                { name: { contains: q } },
+                { description: { contains: q } },
+              ],
+            },
+          ];
+        }
+
+        const total = await this.prisma.share.count({ where });
+
+        const findArgs: any = {
+          where,
+          take: limit + 1,
+          orderBy: { createdAt: "desc" },
+          include: { files: true, security: true },
+        };
+
+        if (params.cursor) {
+          findArgs.cursor = { id: params.cursor };
+          findArgs.skip = 1;
+        }
+
+        const items: any[] = await this.prisma.share.findMany(findArgs);
+        let nextCursor: string | null = null;
+        if (items.length > limit) {
+          const nextItem = items.pop();
+          nextCursor = nextItem ? nextItem.id : null;
+        }
+
+        const appUrl = (this.configService.get("general.appUrl") || "").trim().replace(/\/$/, "");
+
+        const shares = items.map((s) => {
+          const totalBytes = s.files.reduce((acc, f) => acc + parseInt(f.size, 10), 0);
+          const isExpired =
+            s.removedReason !== null ||
+            (s.expiration.getTime() !== 0 && s.expiration.getTime() < Date.now());
+
+          return {
+            id: s.id,
+            name: s.name,
+            description: s.description,
+            createdAt: s.createdAt,
+            expiration: s.expiration,
+            isExpired,
+            uploadLocked: s.uploadLocked,
+            views: s.views,
+            filesCount: s.files.length,
+            totalBytes,
+            hasPassword: !!s.security?.password,
+            maxViews: s.security?.maxViews,
+            url: appUrl ? `${appUrl}/share/${s.id}` : `/share/${s.id}`,
+          };
+        });
+
+        return {
+          shares,
+          nextCursor,
+          total,
+        };
+      },
+      updateShare: async (params) => {
+        const freshUser = await this.prisma.user.findUnique({
+          where: { id: user.id },
+        });
+        if (!freshUser) throw new ForbiddenException("User not found");
+
+        const share = await this.prisma.share.findUnique({
+          where: { id: params.shareId },
+          include: { security: true },
+        });
+
+        if (!share) {
+          throw new NotFoundException(`Share '${params.shareId}' not found`);
+        }
+        if (share.creatorId !== freshUser.id) {
+          throw new ForbiddenException("Cannot update a share owned by another user");
+        }
+
+        const updated = await this.shareService.update(
+          params.shareId,
+          {
+            name: params.name,
+            description: params.description,
+            expiration: params.expiration,
+            security:
+              params.password !== undefined || params.maxViews !== undefined
+                ? {
+                    password: params.password,
+                    maxViews: params.maxViews,
+                  }
+                : undefined,
+          },
+          freshUser,
+          share,
+        );
+
+        return {
+          id: updated.id,
+          name: updated.name,
+          description: updated.description,
+          expiration: updated.expiration,
+          hasPassword: !!updated.security?.password,
+          maxViews: updated.security?.maxViews,
+        };
+      },
+      revokeShare: async (shareId: string) => {
+        const freshUser = await this.prisma.user.findUnique({
+          where: { id: user.id },
+        });
+        if (!freshUser) throw new ForbiddenException("User not found");
+
+        const share = await this.prisma.share.findUnique({
+          where: { id: shareId },
+        });
+
+        if (!share) {
+          throw new NotFoundException(`Share '${shareId}' not found`);
+        }
+        if (share.creatorId !== freshUser.id) {
+          throw new ForbiddenException("Cannot revoke a share owned by another user");
+        }
+
+        // Idempotent immediate revocation: set expiration in the past and mark removedReason
+        await this.prisma.share.update({
+          where: { id: shareId },
+          data: {
+            expiration: new Date(Date.now() - 60000),
+            removedReason: "revoked",
+          },
+        });
+
+        return { success: true, shareId };
+      },
+      deleteShare: async (shareId: string) => {
+        const freshUser = await this.prisma.user.findUnique({
+          where: { id: user.id },
+        });
+        if (!freshUser) throw new ForbiddenException("User not found");
+
+        const share = await this.prisma.share.findUnique({
+          where: { id: shareId },
+        });
+
+        if (!share) {
+          throw new NotFoundException(`Share '${shareId}' not found`);
+        }
+        if (share.creatorId !== freshUser.id) {
+          throw new ForbiddenException("Cannot delete a share owned by another user");
+        }
+
+        this.pendingUploads.delete(shareId);
+        await this.fileService.abortPendingUploads(shareId);
+        await this.shareService.remove(shareId, false);
+
+        return { success: true, shareId };
+      },
+      getUploadStatus: async (shareId: string) => {
+        const freshUser = await this.prisma.user.findUnique({
+          where: { id: user.id },
+        });
+        if (!freshUser) throw new ForbiddenException("User not found");
+
+        const share = await this.prisma.share.findUnique({
+          where: { id: shareId },
+          select: { id: true, creatorId: true },
+        });
+
+        if (!share) {
+          throw new NotFoundException(`Share '${shareId}' not found`);
+        }
+        if (share.creatorId !== freshUser.id) {
+          throw new ForbiddenException("Cannot inspect upload status for a share owned by another user");
+        }
+
+        return this.fileService.getUploadStatus(shareId);
+      },
     };
 
     const server = buildPingvinMcpServer(deps);

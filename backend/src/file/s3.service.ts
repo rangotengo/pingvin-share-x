@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  HttpException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -41,21 +42,31 @@ import * as archiver from "archiver";
 export class S3FileService {
   private readonly logger = new Logger(S3FileService.name);
 
-  private multipartUploads: Record<
-    string,
-    {
-      uploadId: string;
-      shareId?: string;
-      parts: Array<{ ETag: string | undefined; PartNumber: number }>;
-      uploadedBytes: number;
-    }
-  > = {};
+  private readonly locks = new Map<string, Promise<unknown>>();
 
   constructor(
     private prisma: PrismaService,
     private config: ConfigService,
     private readonly i18n: I18nService,
   ) {}
+
+  private async withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(key) || Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.locks.set(key, next);
+    try {
+      await prev;
+      return await fn();
+    } finally {
+      release();
+      if (this.locks.get(key) === next) {
+        this.locks.delete(key);
+      }
+    }
+  }
 
   async create(
     data: string,
@@ -69,6 +80,17 @@ export class S3FileService {
       throw new BadRequestException(this.i18n.t("file.invalidIdFormat"));
     }
 
+    return this.withLock(file.id, () =>
+      this.createLocked(data, chunk, file as { id: string; name: string }, shareId),
+    );
+  }
+
+  private async createLocked(
+    data: string,
+    chunk: { index: number; total: number },
+    file: { id: string; name: string },
+    shareId: string,
+  ) {
     const buffer = Buffer.from(data, "base64");
     const key = `${this.getS3Path()}${shareId}/${file.name}`;
     const bucketName = this.config.get("s3.bucketName");
@@ -81,38 +103,47 @@ export class S3FileService {
       },
     });
 
+    let s3Upload = await this.prisma.s3Upload.findUnique({
+      where: { id: file.id },
+    });
+
     try {
-      // Initialize multipart upload if it's the first chunk and not already initialized
-      if (chunk.index === 0) {
-        if (!this.multipartUploads[file.id]) {
-          const multipartInitResponse = await s3Instance.send(
-            new CreateMultipartUploadCommand({
-              Bucket: bucketName,
-              Key: key,
-            }),
-          );
+      if (!s3Upload) {
+        const multipartInitResponse = await s3Instance.send(
+          new CreateMultipartUploadCommand({
+            Bucket: bucketName,
+            Key: key,
+          }),
+        );
 
-          const uploadId = multipartInitResponse.UploadId;
-          if (!uploadId) {
-            throw new Error(this.i18n.t("file.s3UploadInitError"));
-          }
-
-          // Store the uploadId and parts list in memory
-          this.multipartUploads[file.id] = {
-            uploadId,
-            shareId,
-            parts: [],
-            uploadedBytes: 0,
-          };
+        const uploadId = multipartInitResponse.UploadId;
+        if (!uploadId) {
+          throw new Error(this.i18n.t("file.s3UploadInitError"));
         }
+
+        s3Upload = await this.prisma.s3Upload.create({
+          data: {
+            id: file.id,
+            shareId,
+            name: file.name,
+            uploadId,
+            parts: "[]",
+            uploadedBytes: 0,
+          },
+        });
       }
 
-      // Get the ongoing multipart upload
-      const multipartUpload = this.multipartUploads[file.id];
-      if (!multipartUpload) {
-        throw new InternalServerErrorException(
-          this.i18n.t("file.s3SessionNotFound"),
-        );
+      let parts: Array<{ ETag: string; PartNumber: number }> = [];
+      try {
+        parts = JSON.parse(s3Upload.parts);
+      } catch {
+        parts = [];
+      }
+
+      const partNumber = chunk.index + 1;
+      const existingPart = parts.find((p) => p.PartNumber === partNumber);
+      if (existingPart) {
+        return file;
       }
 
       const quotaOwner = share?.reverseShare
@@ -130,7 +161,7 @@ export class S3FileService {
         );
         const projectedUsage =
           activeStorageUsage +
-          multipartUpload.uploadedBytes +
+          s3Upload.uploadedBytes +
           buffer.byteLength;
 
         if (projectedUsage > quotaLimit) {
@@ -148,11 +179,6 @@ export class S3FileService {
         }
       }
 
-      const uploadId = multipartUpload.uploadId;
-
-      // Upload the current chunk
-      const partNumber = chunk.index + 1; // Part numbers start from 1
-
       if (
         chunk.index < chunk.total - 1 &&
         buffer.byteLength < 5 * 1024 * 1024
@@ -167,63 +193,86 @@ export class S3FileService {
           Bucket: bucketName,
           Key: key,
           PartNumber: partNumber,
-          UploadId: uploadId,
+          UploadId: s3Upload.uploadId,
           Body: buffer,
         }),
       );
 
-      // Store the ETag and PartNumber, deduplicating on retry
-      const existingPartIndex = multipartUpload.parts.findIndex(
-        (p) => p.PartNumber === partNumber,
-      );
-      if (existingPartIndex >= 0) {
-        multipartUpload.parts[existingPartIndex] = {
-          ETag: uploadPartResponse.ETag,
-          PartNumber: partNumber,
-        };
-      } else {
-        multipartUpload.parts.push({
-          ETag: uploadPartResponse.ETag,
-          PartNumber: partNumber,
-        });
-        multipartUpload.uploadedBytes += buffer.byteLength;
-      }
-      multipartUpload.parts.sort((a, b) => a.PartNumber - b.PartNumber);
+      parts.push({
+        ETag: uploadPartResponse.ETag!,
+        PartNumber: partNumber,
+      });
+      parts.sort((a, b) => a.PartNumber - b.PartNumber);
+      const newUploadedBytes = s3Upload.uploadedBytes + buffer.byteLength;
 
-      // Complete the multipart upload if it's the last chunk
+      await this.prisma.s3Upload.update({
+        where: { id: file.id },
+        data: {
+          parts: JSON.stringify(parts),
+          uploadedBytes: newUploadedBytes,
+        },
+      });
+
+      await this.prisma.uploadSession.upsert({
+        where: { id: file.id },
+        create: {
+          id: file.id,
+          shareId,
+          name: file.name,
+          storageProvider: "S3",
+          totalChunks: chunk.total,
+          expectedChunkIndex: chunk.index + 1,
+          committedBytes: newUploadedBytes,
+        },
+        update: {
+          expectedChunkIndex: chunk.index + 1,
+          committedBytes: newUploadedBytes,
+          totalChunks: chunk.total,
+        },
+      });
+
       if (chunk.index === chunk.total - 1) {
         await s3Instance.send(
           new CompleteMultipartUploadCommand({
             Bucket: bucketName,
             Key: key,
-            UploadId: uploadId,
+            UploadId: s3Upload.uploadId,
             MultipartUpload: {
-              Parts: multipartUpload.parts,
+              Parts: parts,
             },
           }),
         );
 
-        // Remove the completed upload from memory
-        delete this.multipartUploads[file.id];
+        await this.prisma.s3Upload.deleteMany({ where: { id: file.id } }).catch(() => {});
+        await this.prisma.uploadSession.deleteMany({ where: { id: file.id } }).catch(() => {});
       }
     } catch (error) {
-      // Abort the multipart upload if it fails
-      const multipartUpload = this.multipartUploads[file.id];
-      if (multipartUpload) {
+      if (s3Upload && !(error instanceof BadRequestException) && !(error instanceof HttpException)) {
         try {
           await s3Instance.send(
             new AbortMultipartUploadCommand({
               Bucket: bucketName,
               Key: key,
-              UploadId: multipartUpload.uploadId,
+              UploadId: s3Upload.uploadId,
             }),
           );
+          await this.prisma.s3Upload.deleteMany({ where: { id: file.id } }).catch(() => {});
+          await this.prisma.uploadSession.deleteMany({ where: { id: file.id } }).catch(() => {});
         } catch (abortError) {
-          console.error("Error aborting multipart upload:", abortError);
+          await this.prisma.cleanupFailure.create({
+            data: {
+              provider: "S3",
+              shareId,
+              fileId: file.id,
+              targetId: `${key}::${s3Upload.uploadId}`,
+              action: "abort_upload",
+              error: (abortError as Error).message || String(abortError),
+            },
+          }).catch(() => {});
         }
-        delete this.multipartUploads[file.id];
       }
       this.logger.error(error);
+      if (error instanceof HttpException) throw error;
       throw new Error(this.i18n.t("file.s3UploadFailed"));
     }
 
@@ -307,6 +356,16 @@ export class S3FileService {
       );
     } catch (error) {
       if (!isMissingObject(error)) {
+        await this.prisma.cleanupFailure.create({
+          data: {
+            provider: "S3",
+            shareId,
+            fileId,
+            targetId: key,
+            action: "delete_file",
+            error: (error as Error).message || String(error),
+          },
+        }).catch(() => {});
         throw new Error(this.i18n.t("file.s3DeleteError"));
       }
     }
@@ -520,6 +579,22 @@ export class S3FileService {
         urls.push(url);
       }
 
+      await this.prisma.s3Upload.upsert({
+        where: { id: `${shareId}_${fileName}` },
+        create: {
+          id: `${shareId}_${fileName}`,
+          shareId,
+          name: fileName,
+          uploadId,
+          parts: "[]",
+          uploadedBytes: 0,
+        },
+        update: {
+          uploadId,
+          parts: "[]",
+        },
+      }).catch(() => {});
+
       return { uploadId, key, urls };
     } catch (error) {
       this.logger.error(error);
@@ -559,6 +634,12 @@ export class S3FileService {
           },
         }),
       );
+      await this.prisma.s3Upload.deleteMany({
+        where: { shareId, name: fileName },
+      }).catch(() => {});
+      await this.prisma.uploadSession.deleteMany({
+        where: { id: fileId },
+      }).catch(() => {});
     } catch (error) {
       this.logger.error("Failed to complete S3 multipart upload:", error);
       throw new BadRequestException(this.i18n.t("file.s3UploadFailed"));
@@ -611,8 +692,20 @@ export class S3FileService {
           UploadId: uploadId,
         }),
       );
+      await this.prisma.s3Upload.deleteMany({
+        where: { shareId, name: fileName },
+      }).catch(() => {});
     } catch (error) {
       this.logger.error("Error aborting multipart upload:", error);
+      await this.prisma.cleanupFailure.create({
+        data: {
+          provider: "S3",
+          shareId,
+          targetId: `${key}::${uploadId}`,
+          action: "abort_upload",
+          error: (error as Error).message || String(error),
+        },
+      }).catch(() => {});
     }
   }
 
@@ -651,30 +744,43 @@ export class S3FileService {
     return normalized ? `${normalized}/` : "";
   }
 
-  hasPendingUploads(shareId: string): boolean {
-    return Object.values(this.multipartUploads).some(
-      (u) => u.shareId === shareId,
-    );
+  async hasPendingUploads(shareId: string): Promise<boolean> {
+    const count = await this.prisma.s3Upload.count({
+      where: { shareId },
+    });
+    return count > 0;
   }
 
   async abortShareMultipartUploads(shareId: string): Promise<void> {
     const bucketName = this.config.get("s3.bucketName");
     const s3Instance = this.getS3Instance();
-    for (const [fileId, upload] of Object.entries(this.multipartUploads)) {
-      if (upload.shareId === shareId) {
-        try {
-          await s3Instance.send(
-            new AbortMultipartUploadCommand({
-              Bucket: bucketName,
-              Key: `${this.getS3Path()}${shareId}/${fileId}`,
-              UploadId: upload.uploadId,
-            }),
-          );
-        } catch {
-          // Ignore
-        }
-        delete this.multipartUploads[fileId];
+    const uploads = await this.prisma.s3Upload.findMany({
+      where: { shareId },
+    });
+    for (const upload of uploads) {
+      const key = `${this.getS3Path()}${shareId}/${upload.name}`;
+      try {
+        await s3Instance.send(
+          new AbortMultipartUploadCommand({
+            Bucket: bucketName,
+            Key: key,
+            UploadId: upload.uploadId,
+          }),
+        );
+      } catch (err) {
+        await this.prisma.cleanupFailure.create({
+          data: {
+            provider: "S3",
+            shareId,
+            fileId: upload.id,
+            targetId: `${key}::${upload.uploadId}`,
+            action: "abort_upload",
+            error: (err as Error).message || String(err),
+          },
+        }).catch(() => {});
       }
     }
+    await this.prisma.s3Upload.deleteMany({ where: { shareId } }).catch(() => {});
+    await this.prisma.uploadSession.deleteMany({ where: { shareId } }).catch(() => {});
   }
 }

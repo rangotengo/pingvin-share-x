@@ -20,13 +20,19 @@ Agents can upload files or directories in bounded streaming chunks and receive a
   - `pingvin_upload_chunk`: receives a bounded binary chunk (base64) for a file.
   - `pingvin_complete_share`: finalizes the share and returns the ready public URL.
   - `pingvin_get_share_status`: inspects upload progress and file list.
+  - `pingvin_get_upload_status`: returns detailed resumable upload progress and in-progress chunk offsets across client or server restarts.
+  - `pingvin_list_shares`: paginated search of shares owned by the agent's user account.
+  - `pingvin_update_share`: modifies share expiration, name, description, password, or view limits.
+  - `pingvin_revoke_share`: immediately revokes public access to a share, invalidating all links, tokens, and existing session cookies.
+  - `pingvin_delete_share`: permanently deletes an owned share and all stored files (requires explicit `confirm: true`).
   - `pingvin_cancel_share`: aborts and cleans up uncompleted shares.
 
 ### 2. Local Companion Helper (`scripts/pingvin-mcp-local.js`)
 When an AI agent runs on your local machine and needs to share local files:
 - Remote MCP endpoints cannot read your local filesystem paths.
 - Sending huge base64 files directly through LLM context is slow and consumes massive token budgets.
-- The **local companion helper** runs locally (via stdio or CLI) and exposes an `upload_files(paths)` tool. It streams file chunks from your local disk directly to the Pingvin server and returns the public link in a single tool call.
+- The **local companion helper** runs locally (via stdio or CLI) and exposes `upload_files(paths)` alongside the management tools (`pingvin_list_shares`, `pingvin_update_share`, `pingvin_revoke_share`, `pingvin_delete_share`, etc.). It streams file chunks from your local disk directly to the Pingvin server and returns the public link in a single tool call.
+- **Reliable Upload Recovery**: In-progress uploads automatically checkpoint non-secret progress outside the repo in `~/.cache/pingvin-share/checkpoints/` with strict `0600` permissions. If network drops or either client or server restarts, resuming the upload seamlessly continues from the last confirmed chunk rather than starting over. If a local file changes mid-upload, resume collisions are rejected to prevent corruption.
 - **Zero npm dependencies**: Uses Node.js >= 18 built-ins (`node:fs`, `node:crypto`, `node:readline`, global `fetch`). No `npm install` is required on a clean checkout.
 
 ---
@@ -118,3 +124,13 @@ Total bytes: 14205810
 - **Quota & Limits**: Uploads via agent tokens strictly inherit the user's storage quota, share size limits, and max shares limit.
 - **Path Traversal Protection**: All file paths and chunk names are strictly validated; directory traversal (`..`) and absolute paths are rejected. The local helper ignores symlinks that escape the target directory.
 - **Storage Providers**: Chunked streaming is supported across Local filesystem, Google Drive, and S3 backend storage providers via server-side streaming.
+
+---
+
+## Admin Storage Dashboard
+
+Administrators can monitor storage metrics and active uploads at `/admin/storage`:
+- **Provider Overview**: Share count, file count, and logical bytes stored per provider (Local Disk, S3, and Google Drive), with live connection status.
+- **Local Disk Usage**: Persistent files, temporary/incomplete uploads, and free space vs tracked logical quota.
+- **Active Uploads**: Real-time listing of active and interrupted upload sessions with progress and abort capabilities.
+- **Cleanup Failures**: Durable tracking of any remote provider cleanup failures (e.g., interrupted aborts or transient delete errors) with one-click individual or bulk retry.

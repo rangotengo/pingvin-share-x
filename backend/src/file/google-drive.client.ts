@@ -342,6 +342,36 @@ export class GoogleDriveClient {
     throw new DriveError("delete failed", response.status);
   }
 
+  async storageQuota(): Promise<{
+    limit?: number;
+    usage?: number;
+    usageInDrive?: number;
+    usageInDriveTrash?: number;
+  } | null> {
+    try {
+      const token = await this.getAccessToken();
+      const response = await this.fetchImpl(
+        `${DRIVE_API}/about?fields=storageQuota`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(15_000),
+        },
+      );
+      if (!response.ok) return null;
+      const data = (await this.readJson(response)) as any;
+      const quota = data?.storageQuota;
+      if (!quota) return null;
+      return {
+        limit: quota.limit ? Number(quota.limit) : undefined,
+        usage: quota.usage ? Number(quota.usage) : undefined,
+        usageInDrive: quota.usageInDrive ? Number(quota.usageInDrive) : undefined,
+        usageInDriveTrash: quota.usageInDriveTrash ? Number(quota.usageInDriveTrash) : undefined,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   private async getAccessToken(): Promise<string> {
     if (this.accessToken && this.accessToken.exp > Date.now() + 60_000) {
       return this.accessToken.token;
