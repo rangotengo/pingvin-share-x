@@ -11,6 +11,7 @@ import { EventEmitter } from "events";
 import * as fs from "fs";
 import { PrismaService } from "src/prisma/prisma.service";
 import { stringToTimespan } from "src/utils/date.util";
+import { validateCandidateBatch } from "./config.protocol";
 import { parse as yamlParse } from "yaml";
 import { I18nContext } from "nestjs-i18n";
 import { YamlConfig } from "../../prisma/seed/config.seed";
@@ -204,70 +205,88 @@ export class ConfigService extends EventEmitter {
         ),
       );
 
-    const response: Config[] = [];
-
+    // Validate existence, lock status, and basic types
     for (const variable of data) {
-      response.push(await this.update(variable.key, variable.value));
+      const [category, name] = variable.key.split(".");
+      const configVariable = this.configVariables.find(
+        (c) => c.category === category && c.name === name,
+      );
+
+      if (!configVariable || configVariable.locked) {
+        throw new NotFoundException(
+          this.t("config.variableNotFound", "Config variable not found"),
+        );
+      }
+
+      if (
+        variable.value !== "" &&
+        variable.value !== null &&
+        typeof variable.value !== configVariable.type &&
+        typeof variable.value === "string" &&
+        configVariable.type !== "text" &&
+        configVariable.type !== "timespan"
+      ) {
+        throw new BadRequestException(
+          this.t(
+            "config.invalidType",
+            "Config variable must be of type {type}",
+            {
+              type: configVariable.type,
+            },
+          ),
+        );
+      }
+    }
+
+    // Validate candidate batch state across variables
+    const currentConfig = new Map<string, string | number | boolean | null>();
+    for (const c of this.configVariables) {
+      currentConfig.set(`${c.category}.${c.name}`, c.value ?? c.defaultValue);
+    }
+    const validationResult = validateCandidateBatch(currentConfig, data);
+    if (validationResult.valid === false) {
+      throw new BadRequestException(
+        this.t(
+          validationResult.messageKey,
+          validationResult.fallbackMessage,
+        ),
+      );
+    }
+
+    // Atomically persist all updates
+    const response: Config[] = [];
+    await this.prisma.$transaction(async (tx) => {
+      for (const variable of data) {
+        const [category, name] = variable.key.split(".");
+        const val =
+          variable.value === "" || variable.value === null
+            ? null
+            : variable.value.toString();
+
+        const updated = await tx.config.update({
+          where: {
+            name_category: {
+              category,
+              name,
+            },
+          },
+          data: { value: val },
+        });
+        response.push(updated);
+      }
+    });
+
+    this.configVariables = await this.prisma.config.findMany();
+    for (const variable of data) {
+      this.emit("update", variable.key, variable.value);
     }
 
     return response;
   }
 
   async update(key: string, value: string | number | boolean) {
-    if (!this.isEditAllowed())
-      throw new BadRequestException(
-        this.t(
-          "config.editNotAllowed",
-          "You are only allowed to update config variables via the config.yaml file",
-        ),
-      );
-
-    const configVariable = await this.prisma.config.findUnique({
-      where: {
-        name_category: {
-          category: key.split(".")[0],
-          name: key.split(".")[1],
-        },
-      },
-    });
-
-    if (!configVariable || configVariable.locked)
-      throw new NotFoundException(
-        this.t("config.variableNotFound", "Config variable not found"),
-      );
-
-    if (value === "") {
-      value = null;
-    } else if (
-      typeof value != configVariable.type &&
-      typeof value == "string" &&
-      configVariable.type != "text" &&
-      configVariable.type != "timespan"
-    ) {
-      throw new BadRequestException(
-        this.t("config.invalidType", "Config variable must be of type {type}", {
-          type: configVariable.type,
-        }),
-      );
-    }
-
-    this.validateConfigVariable(key, value);
-
-    const updatedVariable = await this.prisma.config.update({
-      where: {
-        name_category: {
-          category: key.split(".")[0],
-          name: key.split(".")[1],
-        },
-      },
-      data: { value: value === null ? null : value.toString() },
-    });
-
-    this.configVariables = await this.prisma.config.findMany();
-
-    this.emit("update", key, value);
-
-    return updatedVariable;
+    const response = await this.updateMany([{ key, value }]);
+    return response[0];
   }
 
   async setInternal(key: `${string}.${string}`, value: string | null) {
@@ -280,68 +299,6 @@ export class ConfigService extends EventEmitter {
       (item) => item.category === category && item.name === name,
     );
     if (variable) variable.value = value;
-  }
-
-  validateConfigVariable(key: string, value: string | number | boolean) {
-    const validations = [
-      {
-        key: "share.shareIdLength",
-        condition: (value: unknown) =>
-          typeof value === "number" && value >= 2 && value <= 50,
-        message: this.t(
-          "config.shareIdLengthValidation",
-          "Share ID length must be between 2 and 50",
-        ),
-      },
-      {
-        key: "share.zipCompressionLevel",
-        condition: (value: unknown) =>
-          typeof value === "number" && value >= 0 && value <= 9,
-        message: this.t(
-          "config.zipCompressionLevelValidation",
-          "Zip compression level must be between 0 and 9",
-        ),
-      },
-      {
-        key: "googledrive.enabled",
-        condition: (value: unknown) =>
-          !(value === true || value === "true") || !this.get("s3.enabled"),
-        message: this.t(
-          "config.driveAndS3",
-          "Enable only one of Google Drive or S3",
-        ),
-      },
-      {
-        key: "s3.enabled",
-        condition: (value: unknown) =>
-          !(value === true || value === "true") ||
-          !this.get("googledrive.enabled"),
-        message: this.t(
-          "config.driveAndS3",
-          "Enable only one of Google Drive or S3",
-        ),
-      },
-      {
-        key: "oauth.allowedHosts",
-        condition: (value: unknown) => {
-          if (typeof value !== "string" || !value) return true;
-          return value.split(",").every((h) => {
-            const trimmed = h.trim();
-            return !trimmed.includes("://") && !trimmed.includes("/");
-          });
-        },
-        message: this.t(
-          "config.oauthAllowedHostsValidation",
-          "Allowed hosts must be a comma-separated list of hostnames without protocol or paths (e.g. share.internal.example.com)",
-        ),
-      },
-      // TODO add validation for timespan type
-    ];
-
-    const validation = validations.find((validation) => validation.key == key);
-    if (validation && !validation.condition(value)) {
-      throw new BadRequestException(validation.message);
-    }
   }
 
   isEditAllowed(): boolean {

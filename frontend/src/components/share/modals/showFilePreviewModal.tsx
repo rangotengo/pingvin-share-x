@@ -1,5 +1,5 @@
 import { ModalsContextProps } from "@mantine/modals/lib/context";
-import mime from "mime-types";
+import shareService from "../../../services/share.service";
 import { FileMetaData } from "../../../types/File.type";
 import FilePreview from "../FilePreview";
 
@@ -8,7 +8,7 @@ const showFilePreviewModal = (
   file: FileMetaData,
   modals: ModalsContextProps,
 ) => {
-  const mimeType = (mime.contentType(file.name) || "").split(";")[0];
+  const mimeType = shareService.getFileMimeType(file.name);
   return modals.openModal({
     size: "xl",
     title: file.name,

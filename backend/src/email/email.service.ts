@@ -146,18 +146,20 @@ export class EmailService {
     creatorEmail: string,
     shareId: string,
     fileName: string,
-    recipientEmail: string,
+    recipientEmail?: string,
     creatorName?: string,
     recipientName?: string,
   ) {
     const shareUrl = `${this.config.get("general.appUrl")}/s/${shareId}`;
     const downloader = recipientName
-      ? `${recipientName} (${recipientEmail})`
-      : recipientEmail;
+      ? (recipientEmail
+          ? `${recipientName} (${recipientEmail})`
+          : recipientName)
+      : (recipientEmail || "Someone");
 
     const vars = {
       recipient: downloader,
-      recipientEmail,
+      recipientEmail: recipientEmail ?? "Someone",
       fileName,
       shareUrl,
       creator: creatorName ?? "",

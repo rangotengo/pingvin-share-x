@@ -128,6 +128,7 @@ export class FileController {
   @Get("zip")
   @UseGuards(FileSecurityGuard)
   async getZip(
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
     @Param("shareId") shareId: string,
     @Query("recipient") recipientId?: string,
@@ -139,11 +140,13 @@ export class FileController {
       "Content-Disposition": contentDisposition(`${shareId}.zip`),
     });
 
-    void this.fileService.notifyRecipientDownload(
-      shareId,
-      `${shareId}.zip`,
-      getValidRecipientId(recipientId),
-    );
+    if (req.method !== "HEAD") {
+      void this.fileService.notifyRecipientDownload(
+        shareId,
+        `${shareId}.zip`,
+        getValidRecipientId(recipientId),
+      );
+    }
 
     return new StreamableFile(zipStream);
   }
@@ -174,7 +177,7 @@ export class FileController {
         isDownload,
       );
       const fileName = await this.fileService.getFileName(shareId, fileId);
-      if (isDownload) {
+      if (isDownload && req.method !== "HEAD") {
         void this.fileService.notifyRecipientDownload(
           shareId,
           fileName,
@@ -198,8 +201,10 @@ export class FileController {
       return;
     }
 
+    const baseName =
+      file.metaData.name.split(/[/\\]/).pop() || file.metaData.name;
     const mimeType =
-      mime?.lookup?.(file.metaData.name) || "application/octet-stream";
+      mime?.lookup?.(baseName) || "application/octet-stream";
 
     const isPassiveMedia =
       mimeType.startsWith("video/") ||
@@ -232,7 +237,7 @@ export class FileController {
 
     res.set(headers);
 
-    if (isDownload && !file.range) {
+    if (isDownload && !file.range && req.method !== "HEAD") {
       void this.fileService.notifyRecipientDownload(
         shareId,
         file.metaData.name,

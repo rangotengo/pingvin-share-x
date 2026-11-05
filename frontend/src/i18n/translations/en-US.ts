@@ -724,6 +724,8 @@ export default {
   "admin.config.share.default-expiration": "Default expiration",
   "admin.config.share.default-expiration.description":
     "The default expiration time selected when creating a new share.",
+  "admin.config.share.default-expiration.error.exceeds-max":
+    "Default expiration cannot exceed maximum expiration",
   "admin.config.share.max-expiration": "Max expiration",
   "admin.config.share.max-expiration.description":
     "Maximum share expiration. Set to 0 to allow unlimited expiration.",

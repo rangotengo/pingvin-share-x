@@ -5,7 +5,7 @@ import {
   NotFoundException,
   BadRequestException,
 } from "@nestjs/common";
-import { Request } from "express";
+import { Request, Response } from "express";
 import * as moment from "moment";
 import { I18nService } from "nestjs-i18n";
 import { PrismaService } from "src/prisma/prisma.service";
@@ -106,10 +106,22 @@ export class FileSecurityGuard extends ShareSecurityGuard {
       if (share.security?.password)
         throw new ForbiddenException(this._i18n.t("file.passwordProtected"));
 
-      await this._shareService.handleViewCount(
-        share.id,
-        share.security?.maxViews,
-      );
+      const isRange = Boolean(request.headers.range);
+      const isHead = request.method === "HEAD";
+      if (!isRange && !isHead) {
+        await this._shareService.handleViewCount(
+          share.id,
+          share.security?.maxViews,
+        );
+        const response = context.switchToHttp().getResponse<Response>();
+        if (response && typeof response.cookie === "function") {
+          const token = await this._shareService.generateShareToken(share);
+          response.cookie(`share_${share.id}_token`, token, {
+            path: "/",
+            httpOnly: true,
+          });
+        }
+      }
       return true;
     } else {
       return super.canActivate(context);
