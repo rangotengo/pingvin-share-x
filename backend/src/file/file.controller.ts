@@ -19,6 +19,7 @@ import { CreateShareGuard } from "src/share/guard/createShare.guard";
 import { StrictShareOwnerGuard } from "src/share/guard/strictShareOwner.guard";
 import { IdValidation } from "src/share/guard/shareIdValidation.guard";
 import { FileService } from "./file.service";
+import { usesBrowserRedirect } from "./google-drive.protocol";
 import { FileSecurityGuard } from "./guard/fileSecurity.guard";
 import * as mime from "mime-types";
 
@@ -159,7 +160,7 @@ export class FileController {
     const isDownload = download === "true";
     const storageProvider = await this.fileService.getStorageProvider(shareId);
 
-    if (storageProvider === "S3") {
+    if (usesBrowserRedirect(storageProvider)) {
       const url = await this.fileService.getPreSignedDownloadUrl(
         shareId,
         fileId,

@@ -21,6 +21,7 @@ import * as yup from "yup";
 import Meta from "../../components/Meta";
 import LanguagePicker from "../../components/account/LanguagePicker";
 import ThemeSwitcher from "../../components/account/ThemeSwitcher";
+import AgentTokensCard from "../../components/account/AgentTokensCard";
 import showEnableTotpModal from "../../components/account/showEnableTotpModal";
 import { HoverTip } from "../../components/core/HoverTip";
 import useConfig from "../../hooks/config.hook";
@@ -416,6 +417,7 @@ const Account = () => {
             </Tabs.Panel>
           </Tabs>
         </Paper>
+        <AgentTokensCard />
         <Paper withBorder p="xl" mt="lg">
           <Title order={5} mb="xs">
             <FormattedMessage id="account.card.language.title" />

@@ -23,6 +23,8 @@ import { ShareModule } from "./share/share.module";
 import { UserModule } from "./user/user.module";
 import { SystemModule } from "./system/system.module";
 import { AdminNoticeModule } from "./adminNotice/adminNotice.module";
+import { AgentTokenModule } from "./agentToken/agentToken.module";
+import { McpModule } from "./mcp/mcp.module";
 
 import { SystemLanguageResolver } from "./i18n/systemLanguage.resolver";
 
@@ -42,6 +44,8 @@ const i18nPath = existsSync(join(__dirname, "../i18n"))
     UserModule,
     SystemModule,
     AdminNoticeModule,
+    AgentTokenModule,
+    McpModule,
     ThrottlerModule.forRoot([
       {
         ttl: 60 * 1000,

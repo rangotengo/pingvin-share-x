@@ -14,6 +14,7 @@ import {
   LOG_LEVEL_AVAILABLE,
   LOG_LEVEL_DEFAULT,
   LOG_LEVEL_ENV,
+  SHARE_DIRECTORY,
 } from "./constants";
 
 function generateNestJsLogLevels(): LogLevel[] {
@@ -58,6 +59,7 @@ async function bootstrap() {
   await fs.promises.mkdir(`${DATA_DIRECTORY}/uploads/_temp`, {
     recursive: true,
   });
+  await fs.promises.mkdir(SHARE_DIRECTORY, { recursive: true });
 
   app.setGlobalPrefix("api");
 

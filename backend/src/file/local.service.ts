@@ -20,6 +20,7 @@ import { validate as isValidUUID } from "uuid";
 import { SHARE_DIRECTORY } from "../constants";
 import { Readable } from "stream";
 import * as rangeParser from "range-parser";
+import { isEnoent, isRecordMissing } from "./delete-plan";
 import { File } from "./file.service";
 
 @Injectable()
@@ -223,14 +224,16 @@ export class LocalFileService {
     const fileMetaData = await this.prisma.file.findFirst({
       where: { id: fileId, shareId },
     });
-
-    if (!fileMetaData)
-      throw new NotFoundException(this.i18n.t("file.notFound"));
-
     const filePath = this.getSafeFilePath(shareId, fileId);
-    await fs.unlink(filePath);
-
-    await this.prisma.file.delete({ where: { id: fileId } });
+    try {
+      await fs.unlink(filePath);
+    } catch (error) {
+      if (!isEnoent(error)) throw error;
+    }
+    if (!fileMetaData) return;
+    await this.prisma.file.delete({ where: { id: fileId } }).catch((error) => {
+      if (!isRecordMissing(error)) throw error;
+    });
   }
 
   private getSafeFilePath(shareId: string, fileId: string): string {

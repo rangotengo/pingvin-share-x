@@ -7,6 +7,8 @@ import {
 } from "@nestjs/common";
 import { CACHE_MANAGER } from "@nestjs/cache-manager";
 import { Cache } from "cache-manager";
+import { selectNewShareProvider } from "./google-drive.protocol";
+import { GoogleDriveFileService } from "./google-drive.service";
 import { LocalFileService } from "./local.service";
 import { S3FileService } from "./s3.service";
 import { ConfigService } from "src/config/config.service";
@@ -14,6 +16,8 @@ import { Readable } from "stream";
 import { PrismaService } from "../prisma/prisma.service";
 import { EmailService } from "src/email/email.service";
 import { I18nService } from "nestjs-i18n";
+import * as fs from "node:fs";
+import { SHARE_DIRECTORY } from "../constants";
 
 const UPDATED_AT_THROTTLE_MS = 5 * 60 * 1000;
 const DOWNLOAD_NOTIFICATION_COOLDOWN_MS = 15 * 60 * 1000;
@@ -24,6 +28,7 @@ export class FileService {
     private prisma: PrismaService,
     private localFileService: LocalFileService,
     private s3FileService: S3FileService,
+    private googleDriveFileService: GoogleDriveFileService,
     private configService: ConfigService,
     private emailService: EmailService,
     private readonly i18n: I18nService,
@@ -35,14 +40,26 @@ export class FileService {
   // shareId is optional -> can be used to overwrite a storage provider
   private getStorageService(
     storageProvider?: string,
-  ): S3FileService | LocalFileService {
-    if (storageProvider != undefined)
-      return storageProvider == "S3"
-        ? this.s3FileService
-        : this.localFileService;
-    return this.configService.get("s3.enabled")
-      ? this.s3FileService
-      : this.localFileService;
+  ): S3FileService | LocalFileService | GoogleDriveFileService {
+    const provider = storageProvider ?? this.resolveNewShareProvider();
+    if (provider === "S3") return this.s3FileService;
+    if (provider === "GOOGLE_DRIVE") return this.googleDriveFileService;
+    return this.localFileService;
+  }
+
+  resolveNewShareProvider(): "LOCAL" | "S3" | "GOOGLE_DRIVE" {
+    try {
+      return selectNewShareProvider(
+        Boolean(this.configService.get("googledrive.enabled")),
+        Boolean(this.configService.get("s3.enabled")),
+      );
+    } catch {
+      throw new BadRequestException(this.i18n.t("file.driveAndS3"));
+    }
+  }
+
+  cleanupStaleDriveUploads() {
+    return this.googleDriveFileService.cleanupStaleUploads();
   }
 
   async create(
@@ -55,7 +72,13 @@ export class FileService {
     shareId: string,
   ) {
     await this.touchShare(shareId);
-    const storageService = this.getStorageService();
+    const share = await this.prisma.share.findFirst({
+      where: { id: shareId },
+      select: { storageProvider: true },
+    });
+    const storageService = this.getStorageService(
+      share?.storageProvider || this.resolveNewShareProvider(),
+    );
     return storageService.create(data, chunk, file, shareId);
   }
 
@@ -280,6 +303,60 @@ export class FileService {
       stream.on("end", () => resolve(new Uint8Array(Buffer.concat(chunks))));
       stream.on("error", reject);
     });
+  }
+
+  async hasPendingUploads(shareId: string): Promise<boolean> {
+    const shareDir = `${SHARE_DIRECTORY}/${shareId}`;
+    try {
+      if (fs.existsSync(shareDir)) {
+        const files = await fs.promises.readdir(shareDir);
+        if (files.some((f) => f.endsWith(".tmp-chunk"))) {
+          return true;
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
+    if (this.s3FileService.hasPendingUploads(shareId)) {
+      return true;
+    }
+
+    const driveUploadCount = await this.prisma.driveUpload.count({
+      where: { shareId },
+    });
+    if (driveUploadCount > 0) {
+      return true;
+    }
+
+    return false;
+  }
+
+  async abortPendingUploads(shareId: string): Promise<void> {
+    const shareDir = `${SHARE_DIRECTORY}/${shareId}`;
+    try {
+      if (fs.existsSync(shareDir)) {
+        const files = await fs.promises.readdir(shareDir);
+        for (const file of files) {
+          if (file.endsWith(".tmp-chunk")) {
+            await fs.promises.rm(`${shareDir}/${file}`, { force: true }).catch(() => {});
+          }
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
+    await this.s3FileService.abortShareMultipartUploads(shareId).catch(() => {});
+
+    const driveUploads = await this.prisma.driveUpload.findMany({
+      where: { shareId },
+      select: { sessionUri: true },
+    });
+    if (driveUploads.length > 0) {
+      await this.googleDriveFileService.cleanupStaleUploads().catch(() => {});
+      await this.prisma.driveUpload.deleteMany({ where: { shareId } }).catch(() => {});
+    }
   }
 }
 

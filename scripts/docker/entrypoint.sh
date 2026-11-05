@@ -1,5 +1,10 @@
 #!/bin/sh
 
+# ponytail: /bootlog mount copies startup output. Coolify API hides container logs.
+if [ -d /bootlog ]; then
+  exec >> /bootlog/boot.log 2>&1
+fi
+
 # Copy default logo to the frontend public folder if it doesn't exist
 cp -rn /tmp/img/* /opt/app/frontend/public/img
 

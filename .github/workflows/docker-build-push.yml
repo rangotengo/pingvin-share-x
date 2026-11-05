@@ -4,6 +4,9 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+  push:
+    branches:
+      - feat/google-drive-storage
 
 permissions:
   contents: read
@@ -22,8 +25,9 @@ jobs:
         with:
           images: |
             ghcr.io/${{ github.repository }}
-            ${{ github.repository }}
           tags: |
+            type=raw,value=drive,enable=${{ github.ref == 'refs/heads/feat/google-drive-storage' }}
+            type=sha
             type=semver,pattern={{version}},prefix=v
             type=semver,pattern={{major}}.{{minor}},prefix=v
             type=semver,pattern={{major}},prefix=v
@@ -31,6 +35,7 @@ jobs:
             type=raw,value=beta,enable=${{ github.event_name == 'release' && github.event.release.prerelease }}
 
       - name: Login to Docker Hub
+        continue-on-error: true
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
@@ -57,3 +62,14 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           no-cache: true
+
+      - name: Make GHCR package public
+        continue-on-error: true
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method PUT \
+            -H "Accept: application/vnd.github+json" \
+            "/user/packages/container/pingvin-share-x/visibility" \
+            -f visibility=public

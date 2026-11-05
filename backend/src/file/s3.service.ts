@@ -27,6 +27,11 @@ import * as crypto from "crypto";
 import * as mime from "mime-types";
 import { byteToHumanSizeString } from "src/utils/fileSize.util";
 import { getUserActiveStorageUsage } from "src/utils/storageQuota.util";
+import {
+  isMissingObject,
+  isMissingObjectCode,
+  isRecordMissing,
+} from "./delete-plan";
 import { File } from "./file.service";
 import { Readable } from "stream";
 import { validate as isValidUUID } from "uuid";
@@ -40,6 +45,7 @@ export class S3FileService {
     string,
     {
       uploadId: string;
+      shareId?: string;
       parts: Array<{ ETag: string | undefined; PartNumber: number }>;
       uploadedBytes: number;
     }
@@ -76,26 +82,29 @@ export class S3FileService {
     });
 
     try {
-      // Initialize multipart upload if it's the first chunk
+      // Initialize multipart upload if it's the first chunk and not already initialized
       if (chunk.index === 0) {
-        const multipartInitResponse = await s3Instance.send(
-          new CreateMultipartUploadCommand({
-            Bucket: bucketName,
-            Key: key,
-          }),
-        );
+        if (!this.multipartUploads[file.id]) {
+          const multipartInitResponse = await s3Instance.send(
+            new CreateMultipartUploadCommand({
+              Bucket: bucketName,
+              Key: key,
+            }),
+          );
 
-        const uploadId = multipartInitResponse.UploadId;
-        if (!uploadId) {
-          throw new Error(this.i18n.t("file.s3UploadInitError"));
+          const uploadId = multipartInitResponse.UploadId;
+          if (!uploadId) {
+            throw new Error(this.i18n.t("file.s3UploadInitError"));
+          }
+
+          // Store the uploadId and parts list in memory
+          this.multipartUploads[file.id] = {
+            uploadId,
+            shareId,
+            parts: [],
+            uploadedBytes: 0,
+          };
         }
-
-        // Store the uploadId and parts list in memory
-        this.multipartUploads[file.id] = {
-          uploadId,
-          parts: [],
-          uploadedBytes: 0,
-        };
       }
 
       // Get the ongoing multipart upload
@@ -144,6 +153,15 @@ export class S3FileService {
       // Upload the current chunk
       const partNumber = chunk.index + 1; // Part numbers start from 1
 
+      if (
+        chunk.index < chunk.total - 1 &&
+        buffer.byteLength < 5 * 1024 * 1024
+      ) {
+        throw new BadRequestException(
+          "S3 multipart non-final chunk must be at least 5MB",
+        );
+      }
+
       const uploadPartResponse: UploadPartCommandOutput = await s3Instance.send(
         new UploadPartCommand({
           Bucket: bucketName,
@@ -154,12 +172,23 @@ export class S3FileService {
         }),
       );
 
-      // Store the ETag and PartNumber for later completion
-      multipartUpload.parts.push({
-        ETag: uploadPartResponse.ETag,
-        PartNumber: partNumber,
-      });
-      multipartUpload.uploadedBytes += buffer.byteLength;
+      // Store the ETag and PartNumber, deduplicating on retry
+      const existingPartIndex = multipartUpload.parts.findIndex(
+        (p) => p.PartNumber === partNumber,
+      );
+      if (existingPartIndex >= 0) {
+        multipartUpload.parts[existingPartIndex] = {
+          ETag: uploadPartResponse.ETag,
+          PartNumber: partNumber,
+        };
+      } else {
+        multipartUpload.parts.push({
+          ETag: uploadPartResponse.ETag,
+          PartNumber: partNumber,
+        });
+        multipartUpload.uploadedBytes += buffer.byteLength;
+      }
+      multipartUpload.parts.sort((a, b) => a.PartNumber - b.PartNumber);
 
       // Complete the multipart upload if it's the last chunk
       if (chunk.index === chunk.total - 1) {
@@ -264,9 +293,7 @@ export class S3FileService {
     const fileMetaData = await this.prisma.file.findFirst({
       where: { id: fileId, shareId },
     });
-
-    if (!fileMetaData)
-      throw new NotFoundException(this.i18n.t("file.notFound"));
+    if (!fileMetaData) return;
 
     const key = `${this.getS3Path()}${shareId}/${fileMetaData.name}`;
     const s3Instance = this.getS3Instance();
@@ -278,11 +305,15 @@ export class S3FileService {
           Key: key,
         }),
       );
-    } catch {
-      throw new Error(this.i18n.t("file.s3DeleteError"));
+    } catch (error) {
+      if (!isMissingObject(error)) {
+        throw new Error(this.i18n.t("file.s3DeleteError"));
+      }
     }
 
-    await this.prisma.file.delete({ where: { id: fileId } });
+    await this.prisma.file.delete({ where: { id: fileId } }).catch((error) => {
+      if (!isRecordMissing(error)) throw error;
+    });
   }
 
   async deleteAllFiles(shareId: string) {
@@ -306,8 +337,10 @@ export class S3FileService {
               Key: key,
             }),
           );
-        } catch {
-          // ignore per-object failure
+        } catch (error) {
+          if (!isMissingObject(error)) {
+            throw new Error(this.i18n.t("file.s3DeleteError"));
+          }
         }
       }
     };
@@ -331,7 +364,7 @@ export class S3FileService {
       }));
 
       // Delete all files in a single request (up to 1000 objects at once)
-      await s3Instance.send(
+      const deleted = await s3Instance.send(
         new DeleteObjectsCommand({
           Bucket: bucketName,
           Delete: {
@@ -339,10 +372,21 @@ export class S3FileService {
           },
         }),
       );
+      const failed = (deleted.Errors || []).filter(
+        (item) => !isMissingObjectCode(item.Code),
+      );
+      if (failed.length > 0) {
+        throw new Error(this.i18n.t("file.s3DeleteError"));
+      }
     } catch (error) {
-      // try deleting by known file names from DB instead.
+      if (isMissingObject(error)) return;
+      if (
+        error instanceof Error &&
+        error.message === this.i18n.t("file.s3DeleteError")
+      ) {
+        throw error;
+      }
       await fallbackDeleteByDb("list_or_bulk_delete_failed");
-      void error;
     }
   }
 
@@ -605,5 +649,32 @@ export class S3FileService {
     if (!configS3Path) return "";
     const normalized = `${configS3Path}`.replace(/^\/+|\/+$/g, "");
     return normalized ? `${normalized}/` : "";
+  }
+
+  hasPendingUploads(shareId: string): boolean {
+    return Object.values(this.multipartUploads).some(
+      (u) => u.shareId === shareId,
+    );
+  }
+
+  async abortShareMultipartUploads(shareId: string): Promise<void> {
+    const bucketName = this.config.get("s3.bucketName");
+    const s3Instance = this.getS3Instance();
+    for (const [fileId, upload] of Object.entries(this.multipartUploads)) {
+      if (upload.shareId === shareId) {
+        try {
+          await s3Instance.send(
+            new AbortMultipartUploadCommand({
+              Bucket: bucketName,
+              Key: `${this.getS3Path()}${shareId}/${fileId}`,
+              UploadId: upload.uploadId,
+            }),
+          );
+        } catch {
+          // Ignore
+        }
+        delete this.multipartUploads[fileId];
+      }
+    }
   }
 }

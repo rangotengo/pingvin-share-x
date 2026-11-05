@@ -56,7 +56,7 @@ export class ClamScanService {
     const storageProvider = share?.storageProvider || "LOCAL";
     const infectedFiles = [];
 
-    if (storageProvider === "S3") {
+    if (storageProvider === "S3" || storageProvider === "GOOGLE_DRIVE") {
       const files = await this.prisma.file.findMany({
         where: { shareId },
         select: { id: true, name: true },

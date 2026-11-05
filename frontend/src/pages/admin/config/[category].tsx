@@ -22,6 +22,7 @@ import AdminConfigInput from "../../../components/admin/configuration/AdminConfi
 import ConfigurationHeader from "../../../components/admin/configuration/ConfigurationHeader";
 import ConfigurationNavBar from "../../../components/admin/configuration/ConfigurationNavBar";
 import LogoConfigInput from "../../../components/admin/configuration/LogoConfigInput";
+import GoogleDriveConnect from "../../../components/admin/configuration/GoogleDriveConnect";
 import TestEmailButton from "../../../components/admin/configuration/TestEmailButton";
 import TestRedisButton from "../../../components/admin/configuration/TestRedisButton";
 import CenterLoader from "../../../components/core/CenterLoader";
@@ -250,6 +251,7 @@ export default function AppShellDemo() {
                       >
                         {t("admin.config.category." + categoryId)}
                       </Title>
+                      {categoryId.toLowerCase() === "googledrive" && <GoogleDriveConnect />}
                       {categoryId.toLowerCase() === "s3" && (
                         <Text color="dimmed" size="sm" mb="md">
                           <FormattedMessage

@@ -42,6 +42,18 @@ const sidebars: SidebarsConfig = {
         },
         {
           type: "doc",
+          id: "setup/google-drive",
+        },
+        {
+          type: "doc",
+          id: "setup/coolify",
+        },
+        {
+          type: "doc",
+          id: "setup/mcp",
+        },
+        {
+          type: "doc",
           id: "setup/upgrading",
         },
       ],
