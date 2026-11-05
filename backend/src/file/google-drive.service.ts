@@ -182,7 +182,20 @@ export class GoogleDriveFileService {
       where: { id: fileId, shareId },
     });
     if (fileMetaData?.providerFileId) {
-      await this.getClient().deleteFile(fileMetaData.providerFileId);
+      try {
+        await this.getClient().deleteFile(fileMetaData.providerFileId);
+      } catch (err) {
+        await this.prisma.cleanupFailure.create({
+          data: {
+            provider: "GOOGLE_DRIVE",
+            shareId,
+            fileId,
+            targetId: fileMetaData.providerFileId,
+            action: "delete_file",
+            error: (err as Error).message || String(err),
+          },
+        }).catch(() => {});
+      }
     }
     if (fileMetaData) {
       await this.prisma.file
@@ -201,6 +214,7 @@ export class GoogleDriveFileService {
       .catch((error) => {
         if (!isRecordMissing(error)) throw error;
       });
+    await this.prisma.uploadSession.deleteMany({ where: { id: fileId } }).catch(() => {});
   }
 
   async deleteAllFiles(shareId: string) {
@@ -212,13 +226,28 @@ export class GoogleDriveFileService {
     if (ids.length > 0) {
       if (!this.connected()) throw new DriveError("not_connected");
       const client = this.getClient();
-      for (const id of ids) await client.deleteFile(id);
+      for (const id of ids) {
+        try {
+          await client.deleteFile(id);
+        } catch (err) {
+          await this.prisma.cleanupFailure.create({
+            data: {
+              provider: "GOOGLE_DRIVE",
+              shareId,
+              targetId: id,
+              action: "delete_file",
+              error: (err as Error).message || String(err),
+            },
+          }).catch(() => {});
+        }
+      }
     }
     const uploads = await this.prisma.driveUpload.findMany({
       where: { shareId },
     });
     await this.cancelUploads(uploads);
     await this.prisma.driveUpload.deleteMany({ where: { shareId } });
+    await this.prisma.uploadSession.deleteMany({ where: { shareId } }).catch(() => {});
   }
 
   async getZip(shareId: string): Promise<Readable> {
@@ -397,6 +426,24 @@ export class GoogleDriveFileService {
         name: file.name,
       },
     });
+
+    await this.prisma.uploadSession.upsert({
+      where: { id: file.id },
+      create: {
+        id: file.id,
+        shareId,
+        name: file.name,
+        storageProvider: "GOOGLE_DRIVE",
+        totalChunks: chunk.total,
+        expectedChunkIndex: chunk.index + 1,
+        committedBytes: bytesSent,
+      },
+      update: {
+        expectedChunkIndex: chunk.index + 1,
+        committedBytes: bytesSent,
+        totalChunks: chunk.total,
+      },
+    }).catch(() => {});
     return { id: file.id, name: file.name };
   }
 
@@ -425,7 +472,15 @@ export class GoogleDriveFileService {
     await this.prisma.driveUpload
       .delete({ where: { id: file.id } })
       .catch(() => {});
+    await this.prisma.uploadSession
+      .deleteMany({ where: { id: file.id } })
+      .catch(() => {});
     return { id: file.id, name: file.name };
+  }
+
+  async storageQuota() {
+    if (!this.connected()) return null;
+    return this.getClient().storageQuota();
   }
 
   private async ensureFolder(client: GoogleDriveClient) {

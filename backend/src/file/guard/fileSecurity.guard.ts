@@ -74,6 +74,10 @@ export class FileSecurityGuard extends ShareSecurityGuard {
         throw new NotFoundException(this._i18n.t("file.notFound"));
       }
 
+      if (share.removedReason) {
+        throw new NotFoundException(share.removedReason, "share_removed");
+      }
+
       // Only the creator and reverse share creator can access the reverse share
       // if it's not public
       if (

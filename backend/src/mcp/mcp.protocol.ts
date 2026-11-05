@@ -358,6 +358,63 @@ export interface McpServerDependencies {
     files: Array<{ id: string; name: string; size: string }>;
   } | null>;
   cancelShare: (shareId: string) => Promise<void>;
+  listShares?: (params: {
+    limit?: number;
+    cursor?: string;
+    query?: string;
+    includeExpired?: boolean;
+  }) => Promise<{
+    shares: Array<{
+      id: string;
+      name?: string | null;
+      description?: string | null;
+      createdAt: Date;
+      expiration: Date;
+      isExpired: boolean;
+      uploadLocked: boolean;
+      views: number;
+      filesCount: number;
+      totalBytes: number;
+      hasPassword: boolean;
+      maxViews?: number | null;
+      url: string;
+    }>;
+    nextCursor: string | null;
+    total: number;
+  }>;
+  updateShare?: (params: {
+    shareId: string;
+    name?: string;
+    description?: string;
+    expiration?: string;
+    password?: string;
+    maxViews?: number;
+  }) => Promise<{
+    id: string;
+    name?: string | null;
+    description?: string | null;
+    expiration: Date;
+    hasPassword: boolean;
+    maxViews?: number | null;
+  }>;
+  revokeShare?: (shareId: string) => Promise<{ success: boolean; shareId: string }>;
+  deleteShare?: (shareId: string) => Promise<{ success: boolean; shareId: string }>;
+  getUploadStatus?: (shareId: string) => Promise<{
+    shareId: string;
+    storageProvider: string;
+    isCompleted: boolean;
+    chunkSize: number;
+    files: Array<{ id: string; name: string; size: string }>;
+    pendingFiles: Array<{
+      id: string;
+      name: string;
+      totalChunks?: number | null;
+      expectedChunkIndex: number;
+      committedBytes: number;
+      updatedAt: Date;
+    }>;
+    canComplete: boolean;
+  }>;
 }
 
 async function resolveUser(deps: McpServerDependencies) {
@@ -742,6 +799,229 @@ export function buildPingvinMcpServer(deps: McpServerDependencies): McpServer {
               text: `Error canceling share: ${msg}`,
             },
           ],
+        };
+      }
+    },
+  );
+
+  // Tool 6: pingvin_list_shares
+  server.tool(
+    "pingvin_list_shares",
+    "List and search shares owned by the authenticated agent user with pagination.",
+    {
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(20)
+        .optional()
+        .describe("Number of shares to return (1-100, default 20)"),
+      cursor: z
+        .string()
+        .optional()
+        .describe("Pagination cursor: shareId of last item from previous page"),
+      query: z
+        .string()
+        .max(255)
+        .optional()
+        .describe("Substring search query matching share name or description"),
+      includeExpired: z
+        .boolean()
+        .default(false)
+        .optional()
+        .describe("Include expired or revoked shares (default false)"),
+    },
+    async (args) => {
+      try {
+        if (!deps.listShares) throw new Error("listShares not implemented");
+        const res = await deps.listShares(args);
+        return {
+          content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+        };
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Error listing shares: ${msg}` }],
+        };
+      }
+    },
+  );
+
+  // Tool 7: pingvin_update_share
+  server.tool(
+    "pingvin_update_share",
+    "Update an existing share's expiration, name, description, password, or max views limit.",
+    {
+      shareId: z.string().describe("ID of the share to update"),
+      name: z.string().max(255).optional().describe("New name for the share"),
+      description: z.string().max(1024).optional().describe("New description for the share"),
+      expiration: z
+        .string()
+        .optional()
+        .describe("New expiration: '1d', '7d', 'never', or ISO 8601 string"),
+      password: z
+        .string()
+        .optional()
+        .describe("New password to protect share, or empty string to remove password"),
+      maxViews: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("New maximum view count limit"),
+    },
+    async (args) => {
+      try {
+        if (!deps.updateShare) throw new Error("updateShare not implemented");
+        const res = await deps.updateShare(args);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
+                  share: res,
+                  message: "Share updated successfully.",
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Error updating share: ${msg}` }],
+        };
+      }
+    },
+  );
+
+  // Tool 8: pingvin_revoke_share
+  server.tool(
+    "pingvin_revoke_share",
+    "Immediately revoke public access to a share, invalidating all links, tokens, and existing session cookies.",
+    {
+      shareId: z.string().describe("ID of the share to revoke"),
+    },
+    async (args) => {
+      try {
+        if (!deps.revokeShare) throw new Error("revokeShare not implemented");
+        const res = await deps.revokeShare(args.shareId);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
+                  shareId: res.shareId,
+                  message:
+                    "Share revoked successfully. All existing links, tokens, and cookies are now invalid.",
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Error revoking share: ${msg}` }],
+        };
+      }
+    },
+  );
+
+  // Tool 9: pingvin_delete_share
+  server.tool(
+    "pingvin_delete_share",
+    "Permanently delete an owned share and all associated files. Destructive action requires explicit confirm: true.",
+    {
+      shareId: z.string().describe("ID of the share to permanently delete"),
+      confirm: z
+        .boolean()
+        .optional()
+        .describe(
+          "Confirmation flag: must be strictly true to delete the share and all files",
+        ),
+    },
+    async (args) => {
+      try {
+        if (args.confirm !== true) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    success: false,
+                    requiresConfirmation: true,
+                    shareId: args.shareId,
+                    message:
+                      "Confirmation required: set confirm: true to permanently delete this share and all its files.",
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        }
+        if (!deps.deleteShare) throw new Error("deleteShare not implemented");
+        const res = await deps.deleteShare(args.shareId);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  success: true,
+                  shareId: res.shareId,
+                  message: "Share and files deleted successfully.",
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Error deleting share: ${msg}` }],
+        };
+      }
+    },
+  );
+
+  // Tool 10: pingvin_get_upload_status
+  server.tool(
+    "pingvin_get_upload_status",
+    "Get detailed resumable upload progress, completed files, and in-progress chunk state for a share.",
+    {
+      shareId: z.string().describe("ID of the share to inspect"),
+    },
+    async (args) => {
+      try {
+        if (!deps.getUploadStatus) throw new Error("getUploadStatus not implemented");
+        const status = await deps.getUploadStatus(args.shareId);
+        return {
+          content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
+        };
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Error getting upload status: ${msg}` }],
         };
       }
     },

@@ -185,6 +185,65 @@ test("McpServer tools register and execute full chunked upload and share lifecyc
       files.delete(shareId);
       pendingFiles.delete(shareId);
     },
+    listShares: async (params) => {
+      const all = Array.from(shares.values()).map((s) => ({
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        createdAt: s.createdAt,
+        expiration: s.expiration,
+        isExpired: s.expiration.getTime() !== 0 && s.expiration.getTime() < Date.now(),
+        uploadLocked: s.uploadLocked,
+        views: 0,
+        filesCount: (files.get(s.id) || []).length,
+        totalBytes: 100,
+        hasPassword: !!s.password,
+        maxViews: s.maxViews,
+        url: `https://share.example.com/share/${s.id}`,
+      }));
+      let filtered = all;
+      if (params.query) {
+        filtered = filtered.filter((s) => s.name?.includes(params.query!));
+      }
+      return { shares: filtered, nextCursor: null, total: filtered.length };
+    },
+    updateShare: async (params) => {
+      const share = shares.get(params.shareId);
+      if (!share) throw new Error("Share not found");
+      if (params.name) share.name = params.name;
+      return {
+        id: share.id,
+        name: share.name,
+        description: share.description,
+        expiration: share.expiration,
+        hasPassword: !!share.password,
+        maxViews: share.maxViews,
+      };
+    },
+    revokeShare: async (shareId: string) => {
+      const share = shares.get(shareId);
+      if (!share) throw new Error("Share not found");
+      share.expiration = new Date(Date.now() - 60000);
+      return { success: true, shareId };
+    },
+    deleteShare: async (shareId: string) => {
+      shares.delete(shareId);
+      files.delete(shareId);
+      return { success: true, shareId };
+    },
+    getUploadStatus: async (shareId: string) => {
+      const share = shares.get(shareId);
+      if (!share) throw new Error("Share not found");
+      return {
+        shareId: share.id,
+        storageProvider: "LOCAL",
+        isCompleted: share.uploadLocked,
+        chunkSize: 5000000,
+        files: files.get(shareId) || [],
+        pendingFiles: [],
+        canComplete: true,
+      };
+    },
   };
 
   const server = buildPingvinMcpServer(deps);
@@ -207,6 +266,11 @@ test("McpServer tools register and execute full chunked upload and share lifecyc
   assert.ok(toolNames.includes("pingvin_complete_share"));
   assert.ok(toolNames.includes("pingvin_get_share_status"));
   assert.ok(toolNames.includes("pingvin_cancel_share"));
+  assert.ok(toolNames.includes("pingvin_list_shares"));
+  assert.ok(toolNames.includes("pingvin_update_share"));
+  assert.ok(toolNames.includes("pingvin_revoke_share"));
+  assert.ok(toolNames.includes("pingvin_delete_share"));
+  assert.ok(toolNames.includes("pingvin_get_upload_status"));
 
   // 2. Create share
   const createRes: any = await client.callTool({
@@ -331,7 +395,62 @@ test("McpServer tools register and execute full chunked upload and share lifecyc
   assert.equal(badFileId.isError, true);
   assert.match(badFileId.content[0].text, /valid UUID/);
 
-  // 10. Dynamic permission check: disabled user rejected
+  // 10. Test new tools: list, update, revoke, delete, upload status
+  const listRes: any = await client.callTool({
+    name: "pingvin_list_shares",
+    arguments: { query: "Agent" },
+  });
+  assert.equal(listRes.isError, undefined);
+  const listData = JSON.parse(listRes.content[0].text);
+  assert.equal(listData.shares.length, 1);
+  assert.equal(listData.shares[0].id, shareId);
+
+  const statusCheck: any = await client.callTool({
+    name: "pingvin_get_upload_status",
+    arguments: { shareId },
+  });
+  assert.equal(statusCheck.isError, undefined);
+  const statusCheckData = JSON.parse(statusCheck.content[0].text);
+  assert.equal(statusCheckData.isCompleted, true);
+
+  const updateRes: any = await client.callTool({
+    name: "pingvin_update_share",
+    arguments: {
+      shareId,
+      name: "Renamed Agent Batch",
+    },
+  });
+  assert.equal(updateRes.isError, undefined);
+  const updateData = JSON.parse(updateRes.content[0].text);
+  assert.equal(updateData.share.name, "Renamed Agent Batch");
+
+  const revokeRes: any = await client.callTool({
+    name: "pingvin_revoke_share",
+    arguments: { shareId },
+  });
+  assert.equal(revokeRes.isError, undefined);
+  const revokeData = JSON.parse(revokeRes.content[0].text);
+  assert.equal(revokeData.success, true);
+
+  // pingvin_delete_share without confirm=true requires confirmation
+  const deleteNoConfirm: any = await client.callTool({
+    name: "pingvin_delete_share",
+    arguments: { shareId },
+  });
+  assert.equal(deleteNoConfirm.isError, undefined);
+  const delData1 = JSON.parse(deleteNoConfirm.content[0].text);
+  assert.equal(delData1.requiresConfirmation, true);
+
+  // pingvin_delete_share with confirm=true permanently deletes
+  const deleteConfirmed: any = await client.callTool({
+    name: "pingvin_delete_share",
+    arguments: { shareId, confirm: true },
+  });
+  assert.equal(deleteConfirmed.isError, undefined);
+  const delData2 = JSON.parse(deleteConfirmed.content[0].text);
+  assert.equal(delData2.success, true);
+
+  // 11. Dynamic permission check: disabled user rejected for creation, but can list/manage
   currentUserState = { ...currentUserState, allowShare: false };
   const disabledShare: any = await client.callTool({
     name: "pingvin_create_share",
@@ -339,6 +458,12 @@ test("McpServer tools register and execute full chunked upload and share lifecyc
   });
   assert.equal(disabledShare.isError, true);
   assert.match(disabledShare.content[0].text, /Sharing is disabled/);
+
+  const allowedList: any = await client.callTool({
+    name: "pingvin_list_shares",
+    arguments: {},
+  });
+  assert.equal(allowedList.isError, undefined);
 
   await client.close();
 });

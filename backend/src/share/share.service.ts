@@ -284,6 +284,12 @@ export class ShareService {
         this.i18n.t("share.completionRequiresFile"),
       );
 
+    if (await this.fileService.hasPendingUploads(id)) {
+      throw new BadRequestException(
+        "Cannot complete share: file uploads are still in progress",
+      );
+    }
+
     if (!share.reverseShare && share.creator) {
       if (share.creator.allowShare === false) {
         throw new ForbiddenException(this.i18n.t("share.notAllowedToShare"));

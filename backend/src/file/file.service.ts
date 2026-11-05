@@ -306,6 +306,11 @@ export class FileService {
   }
 
   async hasPendingUploads(shareId: string): Promise<boolean> {
+    const uploadSessionCount = await this.prisma.uploadSession.count({
+      where: { shareId },
+    });
+    if (uploadSessionCount > 0) return true;
+
     const shareDir = `${SHARE_DIRECTORY}/${shareId}`;
     try {
       if (fs.existsSync(shareDir)) {
@@ -318,7 +323,7 @@ export class FileService {
       // Ignore
     }
 
-    if (this.s3FileService.hasPendingUploads(shareId)) {
+    if (await this.s3FileService.hasPendingUploads(shareId)) {
       return true;
     }
 
@@ -357,6 +362,57 @@ export class FileService {
       await this.googleDriveFileService.cleanupStaleUploads().catch(() => {});
       await this.prisma.driveUpload.deleteMany({ where: { shareId } }).catch(() => {});
     }
+
+    await this.prisma.uploadSession.deleteMany({ where: { shareId } }).catch(() => {});
+  }
+
+  async getUploadStatus(shareId: string) {
+    const share = await this.prisma.share.findUnique({
+      where: { id: shareId },
+      include: { files: true },
+    });
+    if (!share) {
+      throw new NotFoundException(`Share '${shareId}' not found`);
+    }
+
+    const chunkSize = parseInt(
+      this.configService.get("share.chunkSize") || "52428800",
+      10,
+    );
+
+    const pendingUploads = await this.prisma.uploadSession.findMany({
+      where: { shareId },
+      orderBy: { createdAt: "asc" },
+    });
+
+    const pendingFiles = pendingUploads.map((u) => ({
+      id: u.id,
+      name: u.name,
+      storageProvider: u.storageProvider,
+      totalChunks: u.totalChunks,
+      expectedChunkIndex: u.expectedChunkIndex,
+      committedBytes: u.committedBytes,
+      updatedAt: u.updatedAt,
+    }));
+
+    const files = share.files.map((f) => ({
+      id: f.id,
+      name: f.name,
+      size: f.size,
+    }));
+
+    const hasPending = (await this.hasPendingUploads(shareId)) || pendingFiles.length > 0;
+    const canComplete = !share.uploadLocked && files.length > 0 && !hasPending;
+
+    return {
+      shareId: share.id,
+      storageProvider: share.storageProvider,
+      isCompleted: share.uploadLocked,
+      chunkSize,
+      files,
+      pendingFiles,
+      canComplete,
+    };
   }
 }
 

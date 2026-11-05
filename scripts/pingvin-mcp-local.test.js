@@ -7,6 +7,10 @@ const {
   collectFiles,
   getStableFileId,
   parseToolResponse,
+  loadCheckpoint,
+  saveCheckpoint,
+  clearCheckpoint,
+  getFileFingerprint,
 } = require("./pingvin-mcp-local.js");
 
 test("collectFiles handles individual files and recursive directories", () => {
@@ -114,4 +118,83 @@ test("parseToolResponse validates tool results and errors safely", () => {
     () => parseToolResponse(null, "tool"),
     /tool returned empty or invalid response/,
   );
+});
+
+test("checkpoint persists nonsecret state with safe 0600 permissions and survives reload", () => {
+  const tmpCheckpoints = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pingvin-ckpt-test-"),
+  );
+  process.env.PINGVIN_CHECKPOINT_DIR = tmpCheckpoints;
+
+  try {
+    const testFile = path.join(tmpCheckpoints, "test.txt");
+    fs.writeFileSync(testFile, "Hello checkpoint world");
+    const fp = getFileFingerprint(testFile);
+
+    const files = [
+      {
+        absolutePath: testFile,
+        shareName: "test.txt",
+        size: fp.size,
+        mtimeMs: fp.mtimeMs,
+        headHash: fp.headHash,
+        fileId: "00000000-0000-4000-8000-000000000001",
+      },
+    ];
+
+    const serverUrl = "https://share.example.com";
+    const shareId = "share_test_123";
+
+    saveCheckpoint(serverUrl, files, shareId, {
+      "test.txt": { lastConfirmedChunk: 2 },
+    });
+
+    const loaded = loadCheckpoint(serverUrl, files);
+    assert.ok(loaded);
+    assert.equal(loaded.shareId, shareId);
+    assert.equal(loaded.serverUrl, serverUrl);
+    assert.equal(loaded.files[0].lastConfirmedChunk, 2);
+
+    // Verify no secret tokens are stored
+    const rawContent = JSON.stringify(loaded);
+    assert.equal(rawContent.includes("token"), false);
+    assert.equal(rawContent.includes("psa_"), false);
+    assert.equal(rawContent.includes("password"), false);
+
+    // Verify file permission is 0600
+    const key = require("node:crypto")
+      .createHash("sha256")
+      .update(`${serverUrl}::test.txt:${fp.size}:${fp.mtimeMs}`)
+      .digest("hex");
+    const ckptFile = path.join(tmpCheckpoints, `${key}.json`);
+    const stat = fs.statSync(ckptFile);
+    assert.equal(stat.mode & 0o777, 0o600);
+
+    // Clear checkpoint
+    clearCheckpoint(serverUrl, files);
+    assert.equal(loadCheckpoint(serverUrl, files), null);
+  } finally {
+    delete process.env.PINGVIN_CHECKPOINT_DIR;
+    fs.rmSync(tmpCheckpoints, { recursive: true, force: true });
+  }
+});
+
+test("file fingerprint detects mid-upload file modifications", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pingvin-mod-test-"));
+  const testFile = path.join(tmpDir, "changing.txt");
+  fs.writeFileSync(testFile, "Initial content 12345");
+
+  try {
+    const fp1 = getFileFingerprint(testFile);
+    assert.equal(fp1.size, 21);
+
+    // Modify file
+    fs.writeFileSync(testFile, "Changed content ABCDEFG 999");
+    const fp2 = getFileFingerprint(testFile);
+
+    assert.notEqual(fp1.size, fp2.size);
+    assert.notEqual(fp1.headHash, fp2.headHash);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

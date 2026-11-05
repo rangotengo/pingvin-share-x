@@ -280,9 +280,29 @@ export default {
   "admin.title": "Administration",
   "admin.button.users": "User management",
   "admin.button.shares": "Share management",
+  "admin.button.storage": "Storage dashboard",
   "admin.button.config": "Configuration",
   "admin.version": "Version",
   // END /admin
+
+  // /admin/storage
+  "admin.storage.title": "Storage dashboard",
+  "admin.storage.providers": "Storage Providers",
+  "admin.storage.diskUsage": "Local Disk Usage",
+  "admin.storage.activeUploads": "Active Uploads",
+  "admin.storage.cleanupFailures": "Cleanup Failures",
+  "admin.storage.retryAll": "Retry All",
+  "admin.storage.defaultProvider": "Default Provider",
+  "admin.storage.status.connected": "Connected",
+  "admin.storage.status.disconnected": "Disconnected",
+  "admin.storage.status.notConfigured": "Not Configured",
+  "admin.storage.noActiveUploads": "No active or interrupted uploads.",
+  "admin.storage.noCleanupFailures": "No cleanup failures recorded.",
+  "admin.storage.abort": "Abort",
+  "admin.storage.retry": "Retry",
+  "admin.storage.dismiss": "Dismiss",
+  "admin.storage.confirmAbort": "Are you sure you want to abort this in-progress upload?",
+  // END /admin/storage
 
   // /admin/users
   "admin.users.title": "User management",
